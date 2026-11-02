@@ -37,6 +37,7 @@
 
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.45;
+  padding:14px 16px 24px;
   padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:14px 24px}
 h1,h2,h3{font-family:var(--f-display);font-weight:700;letter-spacing:.02em;margin:0;text-wrap:balance}
 button,input,textarea{font:inherit;color:inherit}
@@ -252,438 +253,2092 @@ textarea{width:100%;min-height:64px;resize:vertical;padding:6px 8px;border:1px s
 </div>
 
 <script>
-(()=>{
-const PI=Math.PI, TAU=PI*2, D2R=PI/180;
-const norm=a=>((a%TAU)+TAU)%TAU;
-
-/* ---------- Track library (centerline geometry, inches) ---------- */
-const DEFS=[
-  {g:'Straights',id:'s3',  name:'Straight 3"',  kind:'straight',L:3},
-  {g:'Straights',id:'s45', name:'Straight 4½"', kind:'straight',L:4.5},
-  {g:'Straights',id:'s6',  name:'Straight 6"',  kind:'straight',L:6},
-  {g:'Straights',id:'s9',  name:'Straight 9"',  kind:'straight',L:9},
-  {g:'Straights',id:'s10', name:'Straight 10"', kind:'straight',L:10},
-  {g:'Curves',id:'c15', name:'Curve 15" R · 30°',    kind:'curve',R:15,deg:30},
-  {g:'Curves',id:'c18', name:'Curve 18" R · 30°',    kind:'curve',R:18,deg:30},
-  {g:'Curves',id:'c18h',name:'Curve 18" R · 15°',    kind:'curve',R:18,deg:15},
-  {g:'Curves',id:'c22', name:'Curve 22" R · 22.5°',  kind:'curve',R:22,deg:22.5},
-  {g:'Curves',id:'c22h',name:'Curve 22" R · 11.25°', kind:'curve',R:22,deg:11.25},
-  {g:'Curves',id:'c26', name:'Curve 26" R · 15°',    kind:'curve',R:26,deg:15},
-  {g:'Turnouts',id:'tl', name:'Turnout left · 18" R',  kind:'turnout',R:18,deg:30,L:9,side:1},
-  {g:'Turnouts',id:'tr', name:'Turnout right · 18" R', kind:'turnout',R:18,deg:30,L:9,side:-1},
-  {g:'Turnouts',id:'tl22',name:'Turnout left · 22" R', kind:'turnout',R:22,deg:22.5,L:9,side:1},
-  {g:'Turnouts',id:'tr22',name:'Turnout right · 22" R',kind:'turnout',R:22,deg:22.5,L:9,side:-1},
-  {g:'Crossings & ends',id:'x90',name:'Crossing 90°',kind:'cross',L:9,deg:90},
-  {g:'Crossings & ends',id:'x30',name:'Crossing 30°',kind:'cross',L:9,deg:30},
-  {g:'Crossings & ends',id:'bmp',name:'Bumper (end stop)',kind:'bumper'},
-];
-const DEF=Object.fromEntries(DEFS.map(d=>[d.id,d]));
-
-function arcPts(R,deg,side){const th=deg*D2R,n=Math.max(4,Math.ceil(deg/1.5)),p=[];
-  for(let i=0;i<=n;i++){const t=th*i/n;p.push([R*Math.sin(t),-side*R*(1-Math.cos(t))]);}return p;}
-function geom(d){
-  const P=(x,y,a)=>({x,y,a:norm(a)});
-  if(d.kind==='straight')return{ports:[P(0,0,PI),P(d.L,0,0)],paths:[[[0,0],[d.L,0]]]};
-  if(d.kind==='curve'){const a=arcPts(d.R,d.deg,1),e=a[a.length-1];return{ports:[P(0,0,PI),P(e[0],e[1],-d.deg*D2R)],paths:[a]};}
-  if(d.kind==='turnout'){const a=arcPts(d.R,d.deg,d.side),e=a[a.length-1];
-    return{ports:[P(0,0,PI),P(d.L,0,0),P(e[0],e[1],-d.side*d.deg*D2R)],paths:[[[0,0],[d.L,0]],a]};}
-  if(d.kind==='cross'){const h=d.L/2,c=Math.cos(d.deg*D2R),s=Math.sin(d.deg*D2R);
-    const e1=[h-h*c,h*s],e2=[h+h*c,-h*s];
-    return{ports:[P(0,0,PI),P(d.L,0,0),P(e1[0],e1[1],Math.atan2(h*s,-h*c)),P(e2[0],e2[1],Math.atan2(-h*s,h*c))],paths:[[[0,0],[d.L,0]],[e1,e2]],};}
-  if(d.kind==='bumper')return{ports:[P(0,0,PI)],paths:[[[0,0],[2.5,0]]],bumper:true};
-}
-const GEO=Object.fromEntries(DEFS.map(d=>[d.id,geom(d)]));
-const pathLen=p=>{let L=0;for(let i=1;i<p.length;i++)L+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);return L;};
-
-/* ---------- State ---------- */
-const KEY='ho-track-planner-v1';
-const defaultShapes=()=>[{id:1,kind:'rect',role:'table',x:0,y:0,w:96,h:48},{id:2,kind:'ellipse',role:'hole',x:30,y:17,w:36,h:14}];
-let S={shapes:defaultShapes(),pieces:[],grid:1};
-const snapG=v=>S.grid>0?Math.round(v/S.grid)*S.grid:v;
-const snapShape=v=>{const g=S.grid>0?S.grid:0.5;return Math.round(v/g)*g;};
-let nextId=1, selected=null, activeEnd=null, undo=[];
-let nextShape=3, mode='track', selShape=null;
-let moveMode='piece';try{if(localStorage.getItem('ho-move-mode')==='section')moveMode='section';}catch(e){}
-function movingSet(p,link){return moveMode==='section'?groupOf(p.id,link||connections().link):[p];}
-const shapeById=id=>S.shapes.find(s=>s.id===id);
-function bounds(){const t=S.shapes.filter(s=>s.role==='table');const L=t.length?t:S.shapes;
-  if(!L.length)return{x:0,y:0,w:96,h:48};
-  const x0=Math.min(...L.map(s=>s.x)),y0=Math.min(...L.map(s=>s.y)),x1=Math.max(...L.map(s=>s.x+s.w)),y1=Math.max(...L.map(s=>s.y+s.h));
-  return{x:x0,y:y0,w:Math.max(1,x1-x0),h:Math.max(1,y1-y0)};}
-function inShape(s,x,y,m=0){
-  if(s.kind==='rect')return x>=s.x-m&&x<=s.x+s.w+m&&y>=s.y-m&&y<=s.y+s.h+m;
-  // oval = two half circles joined by straight sides (a circle when w = h)
-  const r=Math.min(s.w,s.h)/2,cx=Math.max(s.x+r,Math.min(s.x+s.w-r,x)),cy=Math.max(s.y+r,Math.min(s.y+s.h-r,y));
-  return Math.hypot(x-cx,y-cy)<=r+m;}
-const byId=id=>S.pieces.find(p=>p.id===id);
-
-function lp(p,i){const g=GEO[p.def].ports[i];return p.flip?{x:g.x,y:-g.y,a:norm(-g.a)}:g;}
-function wp(p,i){const l=lp(p,i),c=Math.cos(p.rot),s=Math.sin(p.rot);
-  return{x:p.x+l.x*c-l.y*s,y:p.y+l.x*s+l.y*c,a:norm(l.a+p.rot)};}
-function wpaths(p){const c=Math.cos(p.rot),s=Math.sin(p.rot),f=p.flip?-1:1;
-  return GEO[p.def].paths.map(path=>path.map(([x,y])=>{y*=f;return[p.x+x*c-y*s,p.y+x*s+y*c];}));}
-function placeAttached(p,i,t){const l=lp(p,i);p.rot=norm(t.a+PI-l.a);p.x=0;p.y=0;const w=wp(p,i);p.x=t.x-w.x;p.y=t.y-w.y;}
-function newPiece(def,flip=false){return{id:nextId++,def,x:0,y:0,rot:0,flip};}
-
-function connections(){
-  const ports=[];for(const p of S.pieces){const n=GEO[p.def].ports.length;for(let i=0;i<n;i++)ports.push({pid:p.id,i,...wp(p,i)});}
-  const link=new Map();
-  for(let a=0;a<ports.length;a++)for(let b=a+1;b<ports.length;b++){const A=ports[a],B=ports[b];
-    if(A.pid===B.pid)continue;
-    if(Math.hypot(A.x-B.x,A.y-B.y)<0.12){const d=Math.abs(norm(A.a-B.a)-PI);if(d<0.06){link.set(A.pid+':'+A.i,B);link.set(B.pid+':'+B.i,A);}}}
-  return{ports,link};
-}
-function groupOf(id,link){const seen=new Set([id]),q=[id];
-  while(q.length){const pid=q.pop(),p=byId(pid);const n=GEO[p.def].ports.length;
-    for(let i=0;i<n;i++){const o=link.get(pid+':'+i);if(o&&!seen.has(o.pid)){seen.add(o.pid);q.push(o.pid);}}}
-  return[...seen].map(byId);}
-function rotateGroup(g,d,px,py){const c=Math.cos(d),s=Math.sin(d);
-  for(const p of g){const dx=p.x-px,dy=p.y-py;p.x=px+dx*c-dy*s;p.y=py+dx*s+dy*c;p.rot=norm(p.rot+d);}}
-
-/* ---------- History & persistence ---------- */
-let redo=[];
-function histUI(){ui.undo.disabled=!undo.length;ui.redo.disabled=!redo.length;}
-function snap(){undo.push(JSON.stringify(S));if(undo.length>100)undo.shift();redo=[];histUI();}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
-function loadState(obj){
-  if(!obj||!Array.isArray(obj.pieces))throw new Error('bad');
-  let shapes;
-  if(Array.isArray(obj.shapes))shapes=obj.shapes.filter(s=>s&&(s.kind==='rect'||s.kind==='ellipse'||s.kind==='circle')).map(s=>({id:+s.id,kind:s.kind,role:s.role==='hole'?'hole':'table',x:+s.x,y:+s.y,w:Math.max(1,+s.w),h:Math.max(1,+s.h)}));
-  else if(obj.table){const t=obj.table;shapes=[{id:1,kind:'rect',role:'table',x:0,y:0,w:+t.L||96,h:+t.W||48}];
-    if(t.cw>0&&t.ch>0)shapes.push({id:2,kind:'ellipse',role:'hole',x:t.cx-t.cw/2,y:t.cy-t.ch/2,w:+t.cw,h:+t.ch});}
-  else throw new Error('bad');
-  nextShape=Math.max(0,...shapes.map(s=>s.id))+1;if(!shapes.some(s=>s.id===selShape))selShape=null;
-  const grid=[0,0.5,1,2,3,6,12].includes(+obj.grid)?+obj.grid:1;
-  S={shapes,grid,pieces:obj.pieces.filter(p=>DEF[p.def]).map(p=>({id:+p.id,def:p.def,x:+p.x,y:+p.y,rot:+p.rot,flip:!!p.flip}))};
-  nextId=Math.max(0,...S.pieces.map(p=>p.id))+1;selected=null;activeEnd=null;
-}
-
-/* ---------- Sample ---------- */
-function sample(){
-  S.pieces=[];nextId=1;
-  const bb=bounds(), seq=[...Array(4).fill('s9'),...Array(8).fill('c22'),...Array(4).fill('s9'),...Array(8).fill('c22')];
-  let prev=null;
-  for(const id of seq){const p=newPiece(id);
-    if(!prev){p.x=bb.x+bb.w/2-18;p.y=bb.y+bb.h/2+22;p.rot=0;}else placeAttached(p,0,wp(prev,1));
-    S.pieces.push(p);prev=p;}
-  selected=null;activeEnd=null;
-}
-
-/* ---------- Canvas ---------- */
-const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),stage=document.getElementById('stage');
-let W=0,H=0,dpr=1,view={s:8,ox:0,oy:0},fitted=false,C={};
-function readColors(){const cs=getComputedStyle(document.documentElement);
-  for(const k of['bg','ink','muted','line','accent','mat','mat-edge','grid','grid-strong','ballast','tie','rail','warn','panel'])C[k]=cs.getPropertyValue('--'+k).trim();}
-function fit(){const b=bounds(),pad=W<500?28:44,top=76;view.s=Math.max(1.5,Math.min((W-pad*2)/b.w,(H-top-pad)/b.h));
-  view.ox=(W-b.w*view.s)/2-b.x*view.s;view.oy=top+(H-top-pad-b.h*view.s)/2-b.y*view.s;}
-function resize(){const r=stage.getBoundingClientRect();dpr=window.devicePixelRatio||1;W=r.width;H=r.height;
-  cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);if(!fitted){fit();fitted=true;}render();}
-const toWorld=(sx,sy)=>({x:(sx-view.ox)/view.s,y:(sy-view.oy)/view.s});
-
-function walk(pts,step,cb){let carry=step/2;
-  for(let i=1;i<pts.length;i++){const[x0,y0]=pts[i-1],[x1,y1]=pts[i],L=Math.hypot(x1-x0,y1-y0);if(!L)continue;
-    const tx=(x1-x0)/L,ty=(y1-y0)/L;let d=carry;while(d<=L){cb(x0+tx*d,y0+ty*d,tx,ty);d+=step;}carry=d-L;}}
-function offsetLine(pts,o){return pts.map((pt,i)=>{const a=pts[Math.max(0,i-1)],b=pts[Math.min(pts.length-1,i+1)];
-  const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;return[pt[0]-dy/L*o,pt[1]+dx/L*o];});}
-const fmt=v=>(Math.round(v*2)/2).toString();
-function addShape(q,g){if(q.kind==='rect'){ctx.rect(q.x-g,q.y-g,q.w+2*g,q.h+2*g);return;}
-  const x=q.x-g,y=q.y-g,w=Math.max(0.02,q.w+2*g),h=Math.max(0.02,q.h+2*g),r=Math.min(w,h)/2;
-  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
-const corners=q=>[[q.x,q.y],[q.x+q.w,q.y],[q.x,q.y+q.h],[q.x+q.w,q.y+q.h]];
-function stroke(pts){ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i][0],pts[i][1]);ctx.stroke();}
-
-function problems(){const m=0.9,bad=new Set();
-  const tables=S.shapes.filter(s=>s.role==='table'),holes=S.shapes.filter(s=>s.role==='hole');
-  const onTable=(x,y)=>tables.some(s=>inShape(s,x,y));
-  for(const p of S.pieces){for(const path of wpaths(p)){let hit=false;
-    walk(path,0.5,(x,y)=>{if(hit)return;
-      if(!onTable(x,y)||!onTable(x-m,y)||!onTable(x+m,y)||!onTable(x,y-m)||!onTable(x,y+m))hit=true;
-      else if(holes.some(h=>inShape(h,x,y,m)))hit=true;});
-    if(hit){bad.add(p.id);break;}}}
-  return bad;}
-
-let cache={link:new Map(),ports:[],bad:new Set()};
-function render(){
-  const{link,ports}=connections();const bad=problems();cache={link,ports,bad};
-  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle=C.bg;ctx.fillRect(0,0,W,H);
-  const s=view.s,bb=bounds(),editing=mode==='shapes';
-  ctx.setTransform(dpr*s,0,0,dpr*s,dpr*view.ox,dpr*view.oy);
-  // table surfaces: edge band first, then fill, so overlapping pieces merge
-  const tables=S.shapes.filter(q=>q.role==='table'),holes=S.shapes.filter(q=>q.role==='hole');
-  const edge=Math.max(0.3,1.6/s);
-  ctx.fillStyle=C['mat-edge'];for(const q of tables){ctx.beginPath();addShape(q,edge);ctx.fill();}
-  ctx.fillStyle=C.mat;for(const q of tables){ctx.beginPath();addShape(q,0);ctx.fill();}
-  if(tables.length){ctx.save();ctx.beginPath();tables.forEach(q=>addShape(q,0));ctx.clip();ctx.lineWidth=1/s;
-    const g=S.grid;
-    if(g>0&&g<6&&g*s>=6){ctx.strokeStyle=C.grid;ctx.globalAlpha=0.5;ctx.beginPath();
-      for(let x=Math.floor(bb.x/g)*g;x<=bb.x+bb.w;x+=g){if(Math.abs(x/6-Math.round(x/6))<1e-6)continue;ctx.moveTo(x,bb.y);ctx.lineTo(x,bb.y+bb.h);}
-      for(let y=Math.floor(bb.y/g)*g;y<=bb.y+bb.h;y+=g){if(Math.abs(y/6-Math.round(y/6))<1e-6)continue;ctx.moveTo(bb.x,y);ctx.lineTo(bb.x+bb.w,y);}
-      ctx.stroke();ctx.globalAlpha=1;}
-    const gx0=Math.floor(bb.x/6)*6,gy0=Math.floor(bb.y/6)*6;
-    for(let x=gx0;x<=bb.x+bb.w;x+=6){ctx.strokeStyle=x%12===0?C['grid-strong']:C.grid;ctx.beginPath();ctx.moveTo(x,bb.y);ctx.lineTo(x,bb.y+bb.h);ctx.stroke();}
-    for(let y=gy0;y<=bb.y+bb.h;y+=6){ctx.strokeStyle=y%12===0?C['grid-strong']:C.grid;ctx.beginPath();ctx.moveTo(bb.x,y);ctx.lineTo(bb.x+bb.w,y);ctx.stroke();}
-    ctx.restore();}
-  for(const q of holes){ctx.fillStyle=C.bg;ctx.beginPath();addShape(q,0);ctx.fill();
-    ctx.setLineDash([1.2,0.8]);ctx.strokeStyle=C['mat-edge'];ctx.lineWidth=Math.max(0.2,1.5/s);ctx.stroke();ctx.setLineDash([]);}
-  // track
-  ctx.globalAlpha=editing?0.35:1;
-  const all=S.pieces.map(p=>({p,paths:wpaths(p)}));
-  ctx.lineCap='butt';ctx.lineJoin='round';
-  for(const{p,paths}of all)if(p.id===selected){ctx.strokeStyle=C.accent;ctx.lineWidth=2.7;paths.forEach(stroke);}
-  for(const{p,paths}of all){ctx.strokeStyle=bad.has(p.id)?C.warn:C.ballast;ctx.lineWidth=1.9;paths.forEach(stroke);}
-  ctx.strokeStyle=C.tie;ctx.lineWidth=0.18;
-  for(const{paths}of all)for(const path of paths){ctx.beginPath();
-    walk(path,0.42,(x,y,tx,ty)=>{ctx.moveTo(x-ty*0.62,y+tx*0.62);ctx.lineTo(x+ty*0.62,y-tx*0.62);});ctx.stroke();}
-  ctx.strokeStyle=C.rail;ctx.lineWidth=Math.max(0.11,1/s);
-  for(const{paths}of all)for(const path of paths){stroke(offsetLine(path,0.325));stroke(offsetLine(path,-0.325));}
-  for(const{p,paths}of all)if(GEO[p.def].bumper){const pt=paths[0],e=pt[1],d=[e[0]-pt[0][0],e[1]-pt[0][1]],L=Math.hypot(...d);
-    ctx.strokeStyle=C.warn;ctx.lineWidth=0.6;ctx.beginPath();ctx.moveTo(e[0]+d[1]/L*0.9,e[1]-d[0]/L*0.9);ctx.lineTo(e[0]-d[1]/L*0.9,e[1]+d[0]/L*0.9);ctx.stroke();}
-  ctx.globalAlpha=1;
-  // start-point marker for the selected piece
-  const selP=!editing&&byId(selected);
-  if(selP){const o=wp(selP,0),L=Math.max(1.2,12/s);ctx.strokeStyle=C.accent;ctx.lineWidth=Math.max(0.15,2/s);ctx.beginPath();
-    ctx.moveTo(o.x-L,o.y);ctx.lineTo(o.x+L,o.y);ctx.moveTo(o.x,o.y-L);ctx.lineTo(o.x,o.y+L);ctx.stroke();}
-  // open ends
-  const r=Math.max(0.55,7/s);
-  if(!editing)for(const pt of ports){if(link.has(pt.pid+':'+pt.i))continue;
-    const act=activeEnd&&activeEnd.pid===pt.pid&&activeEnd.i===pt.i;
-    ctx.beginPath();ctx.arc(pt.x,pt.y,act?r*1.5:r,0,TAU);
-    ctx.fillStyle=act?C.accent:C.panel;ctx.fill();ctx.lineWidth=Math.max(0.15,1.6/s);ctx.strokeStyle=C.accent;ctx.stroke();
-    if(act){const L=r*3.2;ctx.beginPath();ctx.moveTo(pt.x,pt.y);ctx.lineTo(pt.x+Math.cos(pt.a)*L,pt.y+Math.sin(pt.a)*L);ctx.lineWidth=Math.max(0.2,2/s);ctx.stroke();}}
-  // shape editing overlay
-  if(editing){ctx.setLineDash([]);
-    for(const q of S.shapes){if(q.id===selShape)continue;ctx.beginPath();addShape(q,0);ctx.strokeStyle=C.ink;ctx.globalAlpha=0.45;ctx.lineWidth=1/s;ctx.stroke();ctx.globalAlpha=1;}
-    const q=shapeById(selShape);
-    if(q){ctx.beginPath();addShape(q,0);ctx.strokeStyle=C.accent;ctx.lineWidth=2/s;ctx.stroke();
-      if(q.kind!=='rect'){ctx.setLineDash([4/s,3/s]);ctx.lineWidth=1/s;ctx.strokeRect(q.x,q.y,q.w,q.h);ctx.setLineDash([]);}
-      const hs=7/s;ctx.fillStyle=C.panel;ctx.lineWidth=1.6/s;
-      for(const[hx,hy]of corners(q)){ctx.fillRect(hx-hs/2,hy-hs/2,hs,hs);ctx.strokeRect(hx-hs/2,hy-hs/2,hs,hs);}}}
-  // rulers
-  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle=C.muted;ctx.font='10px "IBM Plex Mono",ui-monospace,monospace';
-  const every=s<4?24:12;ctx.textAlign='center';ctx.textBaseline='bottom';
-  for(let x=Math.ceil(bb.x/every)*every;x<=bb.x+bb.w+0.01;x+=every)ctx.fillText(x+'"',view.ox+x*s,view.oy+bb.y*s-4);
-  ctx.textAlign='right';ctx.textBaseline='middle';
-  for(let y=Math.ceil(bb.y/every)*every;y<=bb.y+bb.h+0.01;y+=every)ctx.fillText(y+'"',view.ox+bb.x*s-5,view.oy+y*s);
-  // dimension labels for the selected shape
-  const q=editing&&shapeById(selShape);
-  if(q){ctx.font='600 12px "IBM Plex Mono",ui-monospace,monospace';
-    const lab=(txt,x,y)=>{const w=ctx.measureText(txt).width+10;ctx.fillStyle=C.accent;ctx.fillRect(x-w/2,y-9,w,18);ctx.fillStyle='#1c1407';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(txt,x,y);};
-    const X=view.ox+q.x*s,Y=view.oy+q.y*s,Wd=q.w*s,Hd=q.h*s;
-    if(q.kind==='circle')lab('⌀ '+fmt(q.w)+'"',X+Wd/2,Y-14);
-    else{lab(fmt(q.w)+'"',X+Wd/2,Y-14);lab(fmt(q.h)+'"',X+Wd+24,Y+Hd/2);}}
-  updatePanels();
-}
-
-/* ---------- Hit testing ---------- */
-function segDist(px,py,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],L2=dx*dx+dy*dy;let u=L2?((px-a[0])*dx+(py-a[1])*dy)/L2:0;u=Math.max(0,Math.min(1,u));
-  return Math.hypot(px-a[0]-u*dx,py-a[1]-u*dy);}
-function hitPort(w){const tol=Math.max(1.1,22/view.s);let best=null,bd=tol;
-  for(const pt of cache.ports){if(cache.link.has(pt.pid+':'+pt.i))continue;const d=Math.hypot(pt.x-w.x,pt.y-w.y);if(d<bd){bd=d;best=pt;}}return best;}
-function hitPiece(w){const tol=Math.max(1.1,20/view.s);let best=null,bd=tol;
-  for(const p of S.pieces)for(const path of wpaths(p))for(let i=1;i<path.length;i++){const d=segDist(w.x,w.y,path[i-1],path[i]);if(d<bd){bd=d;best=p;}}return best;}
-
-/* ---------- Actions ---------- */
-function firstOpen(p,skip){const n=GEO[p.def].ports.length;const{link}=connections();
-  for(let k=1;k<=n;k++){const i=(skip+k)%n;if(!link.has(p.id+':'+i))return{pid:p.id,i};}return null;}
-function addPiece(def){
-  setMode('track',true);
-  snap();const p=newPiece(def);
-  let target=null;
-  if(activeEnd){const o=byId(activeEnd.pid);if(o&&!cache.link.has(activeEnd.pid+':'+activeEnd.i))target=wp(o,activeEnd.i);}
-  if(target){placeAttached(p,0,target);}else{const c=toWorld(W/2,H/2),b=bounds();p.x=snapG(Math.max(b.x+2,Math.min(b.x+b.w-12,c.x-4)));p.y=snapG(b.y+5);}
-  S.pieces.push(p);selected=p.id;activeEnd=firstOpen(p,0);
-  save();render();
-}
-function connOf(p){const{link}=connections();const n=GEO[p.def].ports.length;
-  for(let i=0;i<n;i++){const o=link.get(p.id+':'+i);if(o)return{i,t:{x:o.x,y:o.y,a:o.a}};}return null;}
-function doFlip(){const p=byId(selected);if(!p)return;snap();const c=connOf(p);p.flip=!p.flip;
-  if(c)placeAttached(p,c.i,c.t);
-  activeEnd=firstOpen(p,c?c.i:0);save();render();}
-function doSwap(){const p=byId(selected);if(!p)return;snap();const n=GEO[p.def].ports.length;const c=connOf(p);
-  if(c){const j=(c.i+1)%n;placeAttached(p,j,c.t);activeEnd=firstOpen(p,j);}
-  else{const w=wp(p,0);rotateGroup([p],PI,w.x,w.y);}
-  save();render();}
-function doRotate(){const p=byId(selected);if(!p)return;snap();const g=movingSet(p);
-  const w=wp(p,0);rotateGroup(g,15*D2R,w.x,w.y);save();render();}
-function doDelete(){if(selected==null)return;snap();S.pieces=S.pieces.filter(p=>p.id!==selected);
-  if(activeEnd&&activeEnd.pid===selected)activeEnd=null;selected=null;save();render();}
-function doUndo(){if(!undo.length)return;redo.push(JSON.stringify(S));loadState(JSON.parse(undo.pop()));histUI();save();render();}
-function doRedo(){if(!redo.length)return;undo.push(JSON.stringify(S));loadState(JSON.parse(redo.pop()));histUI();save();render();}
-
-/* ---------- Pointer ---------- */
-const ptrs=new Map();let drag=null,pan=null,pinch=null;
-cv.addEventListener('pointerdown',e=>{
-  cv.setPointerCapture(e.pointerId);const r=cv.getBoundingClientRect();const sx=e.clientX-r.left,sy=e.clientY-r.top;
-  ptrs.set(e.pointerId,{x:sx,y:sy});
-  if(ptrs.size===2){drag=null;pan=null;const[a,b]=[...ptrs.values()];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),s:view.s,mx:(a.x+b.x)/2,my:(a.y+b.y)/2,ox:view.ox,oy:view.oy};return;}
-  const w=toWorld(sx,sy);
-  if(mode==='shapes'){
-    const sel=shapeById(selShape),tol=Math.max(0.8,12/view.s);
-    if(sel){const ci=corners(sel).findIndex(([hx,hy])=>Math.abs(hx-w.x)<tol&&Math.abs(hy-w.y)<tol);
-      if(ci>=0){const c=corners(sel)[3-ci];drag={shape:sel,resize:true,fx:c[0],fy:c[1],sx,sy,moved:false};return;}}
-    const hit=[...S.shapes.filter(q=>q.role==='hole')].reverse().find(q=>inShape(q,w.x,w.y,tol/2))||[...S.shapes.filter(q=>q.role==='table')].reverse().find(q=>inShape(q,w.x,w.y));
-    if(hit){selShape=hit.id;drag={shape:hit,sx,sy,start:w,ox:hit.x,oy:hit.y,moved:false};render();return;}
-    selShape=null;pan={sx,sy,ox:view.ox,oy:view.oy};render();return;}
-  const port=hitPort(w);
-  const p=port?byId(port.pid):hitPiece(w);
-  if(p){selected=p.id;const g=movingSet(p,cache.link);
-    drag={g,sel:p,sx,sy,start:w,orig:g.map(q=>[q.x,q.y]),moved:false,fromPort:port?{pid:port.pid,i:port.i}:null};render();return;}
-  selected=null;activeEnd=null;pan={sx,sy,ox:view.ox,oy:view.oy,moved:false};render();
-});
-const coordsEl=document.getElementById('coords');
-const fmtIn=v=>(Math.round(v*4)/4).toFixed(2).replace(/\.?0+$/,'')+'"';
-function showCoords(sx,sy){const w=toWorld(sx,sy),dp=drag&&drag.moved&&drag.sel?wp(drag.sel,0):null;
-  coordsEl.textContent=dp?`Start  X ${fmtIn(dp.x)}  Y ${fmtIn(dp.y)}`:`X ${fmtIn(snapG(w.x))}  Y ${fmtIn(snapG(w.y))}`;}
-cv.addEventListener('pointerleave',()=>{if(!drag)coordsEl.textContent='';});
-cv.addEventListener('pointermove',e=>{
-  {const r=cv.getBoundingClientRect();showCoords(e.clientX-r.left,e.clientY-r.top);}
-  if(!ptrs.has(e.pointerId))return;const r=cv.getBoundingClientRect();const sx=e.clientX-r.left,sy=e.clientY-r.top;ptrs.set(e.pointerId,{x:sx,y:sy});
-  if(pinch&&ptrs.size===2){const[a,b]=[...ptrs.values()];const d=Math.hypot(a.x-b.x,a.y-b.y);const ns=Math.max(1.5,Math.min(60,pinch.s*d/pinch.d));
-    const wx=(pinch.mx-pinch.ox)/pinch.s,wy=(pinch.my-pinch.oy)/pinch.s,mx=(a.x+b.x)/2,my=(a.y+b.y)/2;view.s=ns;view.ox=mx-wx*ns;view.oy=my-wy*ns;render();return;}
-  if(drag&&drag.shape){if(!drag.moved&&Math.hypot(sx-drag.sx,sy-drag.sy)<4)return;
-    if(!drag.moved){snap();drag.moved=true;}
-    const w=toWorld(sx,sy),q=drag.shape,sn=snapShape;
-    if(drag.resize){let nx=sn(w.x),ny=sn(w.y);
-      if(q.kind==='circle'){const d=Math.max(1,Math.abs(nx-drag.fx),Math.abs(ny-drag.fy));nx=drag.fx+(nx<drag.fx?-d:d);ny=drag.fy+(ny<drag.fy?-d:d);}
-      q.x=Math.min(nx,drag.fx);q.y=Math.min(ny,drag.fy);q.w=Math.max(1,Math.abs(nx-drag.fx));q.h=Math.max(1,Math.abs(ny-drag.fy));}
-    else{q.x=sn(drag.ox+w.x-drag.start.x);q.y=sn(drag.oy+w.y-drag.start.y);}
-    render();return;}
-  if(drag){if(!drag.moved&&Math.hypot(sx-drag.sx,sy-drag.sy)<4)return;
-    if(!drag.moved){snap();drag.moved=true;activeEnd=null;cv.style.cursor='grabbing';}
-    const w=toWorld(sx,sy);let dx=w.x-drag.start.x,dy=w.y-drag.start.y;
-    drag.g.forEach((q,i)=>{q.x=drag.orig[i][0]+dx;q.y=drag.orig[i][1]+dy;});
-    if(S.grid>0){const o=wp(drag.sel,0),ex=snapG(o.x)-o.x,ey=snapG(o.y)-o.y;drag.g.forEach(q=>{q.x+=ex;q.y+=ey;});}
-    render();}
-  else if(pan){view.ox=pan.ox+sx-pan.sx;view.oy=pan.oy+sy-pan.sy;render();}
-});
-function endPtr(e){ptrs.delete(e.pointerId);if(ptrs.size<2)pinch=null;
-  if(drag&&drag.moved){if(drag.g)snapGroup(drag.g);save();}
-  else if(drag&&drag.fromPort)activeEnd=drag.fromPort;
-  drag=null;pan=null;cv.style.cursor='default';render();}
-cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);
-function snapGroup(g){const ids=new Set(g.map(p=>p.id));const{ports,link}=connections();const tol=Math.max(1.5,26/view.s);
-  let best=null,bd=tol;
-  for(const a of ports){if(!ids.has(a.pid)||link.has(a.pid+':'+a.i))continue;
-    for(const b of ports){if(ids.has(b.pid)||link.has(b.pid+':'+b.i))continue;const d=Math.hypot(a.x-b.x,a.y-b.y);if(d<bd){bd=d;best={a,b};}}}
-  if(!best)return;const{a,b}=best;rotateGroup(g,norm(b.a+PI-a.a),a.x,a.y);
-  const p=byId(a.pid),w=wp(p,a.i),dx=b.x-w.x,dy=b.y-w.y;for(const q of g){q.x+=dx;q.y+=dy;}}
-cv.addEventListener('wheel',e=>{e.preventDefault();const r=cv.getBoundingClientRect();zoomAt(e.clientX-r.left,e.clientY-r.top,Math.exp(-e.deltaY*0.0015));},{passive:false});
-function zoomAt(sx,sy,f){const ns=Math.max(1.5,Math.min(60,view.s*f));const wx=(sx-view.ox)/view.s,wy=(sy-view.oy)/view.s;view.s=ns;view.ox=sx-wx*ns;view.oy=sy-wy*ns;render();}
-
-/* ---------- UI ---------- */
-const $=id=>document.getElementById(id);
-const ui={undo:$('undoBtn'),redo:$('redoBtn'),sel:$('selName'),rot:$('rotBtn'),flip:$('flipBtn'),end:$('endBtn'),del:$('delBtn'),stats:$('stats'),parts:$('parts'),hint:$('hint'),msg:$('msg')};
-
-function previewSVG(id){const g=GEO[id];let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
-  g.paths.flat().forEach(([x,y])=>{x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y);});
-  const pad=1.6,w=Math.max(x1-x0,4)+pad*2,h=Math.max(y1-y0,3)+pad*2,cx=(x0+x1)/2,cy=(y0+y1)/2;
-  const vb=[cx-w/2,cy-h/2,w,h].map(v=>v.toFixed(2)).join(' ');
-  const ds=g.paths.map(p=>'M'+p.map(q=>q[0].toFixed(2)+' '+q[1].toFixed(2)).join('L')).join(' ');
-  const sw=Math.max(w,h)/14;
-  return`<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="${ds}" fill="none" stroke="var(--ballast)" stroke-width="${sw*2.2}" stroke-linecap="butt"/><path d="${ds}" fill="none" stroke="var(--ink)" stroke-width="${sw*0.7}" stroke-linecap="round"/></svg>`;}
-function sub(d){if(d.kind==='straight')return'Length '+d.L+'"';
-  if(d.kind==='curve'){const n=360/d.deg;return n+' per circle · '+(d.R*2)+'" dia';}
-  if(d.kind==='turnout')return d.deg+'° diverge · '+d.L+'" long';
-  if(d.kind==='cross')return d.L+'" legs';return'Ends a siding';}
-(function buildPalette(){const pal=$('palette');const groups=[...new Set(DEFS.map(d=>d.g))];
-  pal.innerHTML=groups.map(g=>`<div class="grp"><h3>${g}</h3><div class="items">${DEFS.filter(d=>d.g===g).map(d=>
-    `<button class="piece" data-def="${d.id}">${previewSVG(d.id)}<span><b>${d.name}</b><small>${sub(d)}</small></span></button>`).join('')}</div></div>`).join('');
-  pal.addEventListener('click',e=>{const b=e.target.closest('.piece');if(b)addPiece(b.dataset.def);});})();
-
-function updatePanels(){
-  const p=byId(selected);
-  ui.sel.textContent=p?DEF[p.def].name+(p.flip&&DEF[p.def].kind==='curve'?' (flipped)':''):'Tap a piece on the table';
-  ui.sel.classList.toggle('none',!p);
-  [ui.rot,ui.flip,ui.end,ui.del,$('pX'),$('pY'),$('pA')].forEach(b=>b.disabled=!p);
-  {const setv=(id,v)=>{const el=$(id);if(document.activeElement!==el)el.value=v;};
-    if(p){const o=wp(p,0);setv('pX',(Math.round(o.x*100)/100).toString());setv('pY',(Math.round(o.y*100)/100).toString());
-      setv('pA',(Math.round(norm(p.rot)/D2R*10)/10%360).toString());}
-    else{setv('pX','');setv('pY','');setv('pA','');}}
-  $('gridSel').value=String(S.grid);
-  $('posScope').textContent=moveMode==='section'?'Changes move everything connected to this piece.':'Changes move just this piece.';
-  $('moveSeg').hidden=mode==='shapes';
-  document.querySelectorAll('#moveSeg button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.move===moveMode)));
-  const open=cache.ports.filter(pt=>!cache.link.has(pt.pid+':'+pt.i)).length;
-  let len=0;for(const q of S.pieces)for(const path of GEO[q.def].paths)len+=pathLen(path);
-  const bad=cache.bad.size;
-  ui.stats.innerHTML=`
-    <div class="stat"><dt>Pieces</dt><dd>${S.pieces.length}</dd></div>
-    <div class="stat"><dt>Track length</dt><dd>${(len/12).toFixed(1)} ft</dd></div>
-    <div class="stat"><dt>Open ends</dt><dd>${S.pieces.length?`<span class="pill ${open?'bad':'ok'}">${open?open:'0 · closed loop'}</span>`:'—'}</dd></div>
-    <div class="stat"><dt>Off table / over hole</dt><dd>${S.pieces.length?`<span class="pill ${bad?'bad':'ok'}">${bad?bad+' pieces':'none'}</span>`:'—'}</dd></div>`;
-  const counts={};S.pieces.forEach(q=>counts[q.def]=(counts[q.def]||0)+1);
-  const rows=DEFS.filter(d=>counts[d.id]).map(d=>`<tr><td>${d.name}</td><td>× ${counts[d.id]}</td></tr>`).join('');
-  ui.parts.innerHTML=rows||'<tr><td class="empty">No track placed yet</td><td></td></tr>';
-  const q=shapeById(selShape);
-  $('shapeEdit').hidden=!q;
-  if(q){document.querySelectorAll('#roleSeg button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.role===q.role)));
-    const set=(id,v)=>{const el=$(id);if(document.activeElement!==el)el.value=fmt(v);};
-    set('shX',q.x);set('shY',q.y);set('shW',q.w);set('shH',q.h);
-    $('shWLabel').textContent=q.kind==='circle'?'Diameter (in)':'Width (in)';$('shHWrap').hidden=q.kind==='circle';}
-  if(mode==='shapes')ui.hint.innerHTML=q?'<span><strong>Drag</strong> to move, drag a <strong>corner square</strong> to resize, or type exact sizes in the panel.</span>':'<span>Tap a shape to edit it, or add a rectangle, oval or circle from <strong>Table shapes</strong>.</span>';
-  else if(activeEnd)ui.hint.innerHTML='<span class="dot"></span><span><strong>End selected.</strong> Tap pieces in the list to keep building from it.</span>';
-  else if(!S.pieces.length)ui.hint.innerHTML='<span>Tap any piece in the list to put it on the table.</span>';
-  else ui.hint.innerHTML='<span>Tap an <strong>open end</strong> (ring) to build from it. Drag a piece to move it; it snaps on when its end comes close to another.</span>';
-}
-
-function syncFields(){}
-$('moveSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;moveMode=b.dataset.move;
-  try{localStorage.setItem('ho-move-mode',moveMode);}catch(err){}render();});
-$('gridSel').addEventListener('change',e=>{S.grid=+e.target.value;save();render();});
-function movePiece(k,val){const p=byId(selected);if(!p||isNaN(val)){render();return;}
-  snap();const g=movingSet(p),o=wp(p,0);
-  if(k==='a'){rotateGroup(g,norm(val*D2R)-p.rot,o.x,o.y);}
-  else{const dx=k==='x'?val-o.x:0,dy=k==='y'?val-o.y:0;g.forEach(q=>{q.x+=dx;q.y+=dy;});}
-  save();render();}
-$('pX').addEventListener('change',e=>movePiece('x',parseFloat(e.target.value)));
-$('pY').addEventListener('change',e=>movePiece('y',parseFloat(e.target.value)));
-$('pA').addEventListener('change',e=>movePiece('a',parseFloat(e.target.value)));
-function setMode(m,quiet){mode=m;document.querySelectorAll('#modeSeg button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===m)));
-  if(m==='shapes'){selected=null;activeEnd=null;}else selShape=null;if(!quiet)render();}
-$('modeSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(b)setMode(b.dataset.mode);});
-document.querySelectorAll('[data-add]').forEach(b=>b.addEventListener('click',()=>{
-  snap();const kind=b.dataset.add,c=toWorld(W/2,H/2),w=kind==='circle'?12:24,h=kind==='circle'?12:12;
-  const q={id:nextShape++,kind,role:kind==='rect'?'table':'hole',x:snapShape(c.x-w/2),y:snapShape(c.y-h/2),w,h};
-  S.shapes.push(q);setMode('shapes',true);selShape=q.id;save();render();}));
-$('roleSeg').addEventListener('click',e=>{const b=e.target.closest('button'),q=shapeById(selShape);if(!b||!q||q.role===b.dataset.role)return;
-  snap();q.role=b.dataset.role;save();render();});
-[['shX','x'],['shY','y'],['shW','w'],['shH','h']].forEach(([id,k])=>$(id).addEventListener('change',e=>{
-  const q=shapeById(selShape),v=parseFloat(e.target.value);if(!q)return;if(isNaN(v)){render();return;}
-  snap();q[k]=(k==='w'||k==='h')?Math.max(1,v):v;if(q.kind==='circle'&&k==='w')q.h=q.w;save();render();}));
-$('shDup').onclick=()=>{const q=shapeById(selShape);if(!q)return;snap();const n={...q,id:nextShape++,x:q.x+3,y:q.y+3};S.shapes.push(n);selShape=n.id;save();render();};
-function delShape(){if(selShape==null)return;snap();S.shapes=S.shapes.filter(q=>q.id!==selShape);selShape=null;save();render();}
-$('shDel').onclick=delShape;
-
-ui.undo.onclick=doUndo;ui.redo.onclick=doRedo;$('fitBtn').onclick=()=>{fit();render();};
-$('zin').onclick=()=>zoomAt(W/2,H/2,1.25);$('zout').onclick=()=>zoomAt(W/2,H/2,0.8);
-let clearTimer=null;const clr=$('clearBtn');
-clr.onclick=()=>{if(clr.classList.contains('armed')){clearTimeout(clearTimer);clr.classList.remove('armed');clr.textContent='Clear track';
-    snap();S.pieces=[];selected=null;activeEnd=null;save();render();return;}
-  clr.classList.add('armed');clr.textContent='Tap again to clear';clearTimer=setTimeout(()=>{clr.classList.remove('armed');clr.textContent='Clear track';},3000);};
-ui.rot.onclick=doRotate;ui.flip.onclick=doFlip;ui.end.onclick=doSwap;ui.del.onclick=doDelete;
-function flash(t,bad){ui.msg.textContent=t;ui.msg.style.color=bad?'var(--warn)':'var(--ok)';setTimeout(()=>{ui.msg.textContent='';},3500);}
-$('copyBtn').onclick=()=>{const code=JSON.stringify(S);const box=$('importBox');
-  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(code).then(()=>flash('Copied layout code.'),()=>{box.value=code;box.select();flash('Code is in the box below. Copy it from there.');});}
-  else{box.value=code;box.select();flash('Code is in the box below. Copy it from there.');}};
-$('loadBtn').onclick=()=>{const v=$('importBox').value.trim();if(!v)return flash('Paste a layout code first.',true);
-  try{const o=JSON.parse(v);snap();loadState(o);syncFields();fit();save();render();flash('Layout loaded.');}
-  catch(e){flash('That code could not be read. Copy the whole code and try again.',true);}};
-document.addEventListener('keydown',e=>{if(e.target.closest('input,textarea'))return;
-  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?doRedo():doUndo();return;}
-  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){e.preventDefault();doRedo();return;}
-  const k=e.key.toLowerCase();
-  if(mode==='shapes'){if(k==='delete'||k==='backspace'){e.preventDefault();delShape();}else if(k==='escape'){selShape=null;render();}return;}
-  if(k==='r')doRotate();else if(k==='f')doFlip();else if(k==='e')doSwap();
-  else if(k==='delete'||k==='backspace'){e.preventDefault();doDelete();}
-  else if(k==='escape'){selected=null;activeEnd=null;render();}});
-
-/* ---------- Boot ---------- */
-readColors();
-let loaded=false;try{const raw=localStorage.getItem(KEY);if(raw){loadState(JSON.parse(raw));loaded=true;}}catch(e){}
-syncFields();
-new ResizeObserver(resize).observe(stage);
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{readColors();render();});
-new MutationObserver(()=>{readColors();render();}).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+function ownKeys(e, r) { var t = Object.keys(e); if (Object.getOwnPropertySymbols) { var o = Object.getOwnPropertySymbols(e); r && (o = o.filter(function (r) { return Object.getOwnPropertyDescriptor(e, r).enumerable; })), t.push.apply(t, o); } return t; }
+function _objectSpread(e) { for (var r = 1; r < arguments.length; r++) { var t = null != arguments[r] ? arguments[r] : {}; r % 2 ? ownKeys(Object(t), !0).forEach(function (r) { _defineProperty(e, r, t[r]); }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(t)) : ownKeys(Object(t)).forEach(function (r) { Object.defineProperty(e, r, Object.getOwnPropertyDescriptor(t, r)); }); } return e; }
+function _defineProperty(e, r, t) { return (r = _toPropertyKey(r)) in e ? Object.defineProperty(e, r, { value: t, enumerable: !0, configurable: !0, writable: !0 }) : e[r] = t, e; }
+function _toPropertyKey(t) { var i = _toPrimitive(t, "string"); return "symbol" == typeof i ? i : i + ""; }
+function _toPrimitive(t, e) { if ("object" != typeof t || !t) return t; var r; if ("undefined" != typeof Symbol && void 0 !== (r = t[Symbol.toPrimitive])) { var i = r.call(t, e || "default"); if ("object" != typeof i) return i; throw new TypeError("@@toPrimitive must return a primitive value."); } return ("string" === e ? String : Number)(t); }
+function _createForOfIteratorHelper(r, e) { var t = "undefined" != typeof Symbol && r[Symbol.iterator] || r["@@iterator"]; if (!t) { if (Array.isArray(r) || (t = _unsupportedIterableToArray(r)) || e && r && "number" == typeof r.length) { t && (r = t); var _n = 0, F = function F() {}; return { s: F, n: function n() { return _n >= r.length ? { done: !0 } : { done: !1, value: r[_n++] }; }, e: function e(r) { throw r; }, f: F }; } throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); } var o, a = !0, u = !1; return { s: function s() { t = t.call(r); }, n: function n() { var r = t.next(); return a = r.done, r; }, e: function e(r) { u = !0, o = r; }, f: function f() { try { a || null == t.return || t.return(); } finally { if (u) throw o; } } }; }
+function _toConsumableArray(r) { return _arrayWithoutHoles(r) || _iterableToArray(r) || _unsupportedIterableToArray(r) || _nonIterableSpread(); }
+function _nonIterableSpread() { throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
+function _iterableToArray(r) { if ("undefined" != typeof Symbol && null != r[Symbol.iterator] || null != r["@@iterator"]) return Array.from(r); }
+function _arrayWithoutHoles(r) { if (Array.isArray(r)) return _arrayLikeToArray(r); }
+function _slicedToArray(r, e) { return _arrayWithHoles(r) || _iterableToArrayLimit(r, e) || _unsupportedIterableToArray(r, e) || _nonIterableRest(); }
+function _nonIterableRest() { throw new TypeError("Invalid attempt to destructure non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
+function _unsupportedIterableToArray(r, a) { if (r) { if ("string" == typeof r) return _arrayLikeToArray(r, a); var t = {}.toString.call(r).slice(8, -1); return "Object" === t && r.constructor && (t = r.constructor.name), "Map" === t || "Set" === t ? Array.from(r) : "Arguments" === t || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(t) ? _arrayLikeToArray(r, a) : void 0; } }
+function _arrayLikeToArray(r, a) { (null == a || a > r.length) && (a = r.length); for (var e = 0, n = Array(a); e < a; e++) n[e] = r[e]; return n; }
+function _iterableToArrayLimit(r, l) { var t = null == r ? null : "undefined" != typeof Symbol && r[Symbol.iterator] || r["@@iterator"]; if (null != t) { var e, n, i, u, a = [], f = !0, o = !1; try { if (i = (t = t.call(r)).next, 0 === l) { if (Object(t) !== t) return; f = !1; } else for (; !(f = (e = i.call(t)).done) && (a.push(e.value), a.length !== l); f = !0); } catch (r) { o = !0, n = r; } finally { try { if (!f && null != t.return && (u = t.return(), Object(u) !== u)) return; } finally { if (o) throw n; } } return a; } }
+function _arrayWithHoles(r) { if (Array.isArray(r)) return r; }
+(function () {
+  var PI = Math.PI,
+    TAU = PI * 2,
+    D2R = PI / 180;
+  var norm = function norm(a) {
+    return (a % TAU + TAU) % TAU;
+  };
+  var DEFS = [{
+    g: 'Straights',
+    id: 's3',
+    name: 'Straight 3"',
+    kind: 'straight',
+    L: 3
+  }, {
+    g: 'Straights',
+    id: 's45',
+    name: 'Straight 4½"',
+    kind: 'straight',
+    L: 4.5
+  }, {
+    g: 'Straights',
+    id: 's6',
+    name: 'Straight 6"',
+    kind: 'straight',
+    L: 6
+  }, {
+    g: 'Straights',
+    id: 's9',
+    name: 'Straight 9"',
+    kind: 'straight',
+    L: 9
+  }, {
+    g: 'Straights',
+    id: 's10',
+    name: 'Straight 10"',
+    kind: 'straight',
+    L: 10
+  }, {
+    g: 'Curves',
+    id: 'c15',
+    name: 'Curve 15" R · 30°',
+    kind: 'curve',
+    R: 15,
+    deg: 30
+  }, {
+    g: 'Curves',
+    id: 'c18',
+    name: 'Curve 18" R · 30°',
+    kind: 'curve',
+    R: 18,
+    deg: 30
+  }, {
+    g: 'Curves',
+    id: 'c18h',
+    name: 'Curve 18" R · 15°',
+    kind: 'curve',
+    R: 18,
+    deg: 15
+  }, {
+    g: 'Curves',
+    id: 'c22',
+    name: 'Curve 22" R · 22.5°',
+    kind: 'curve',
+    R: 22,
+    deg: 22.5
+  }, {
+    g: 'Curves',
+    id: 'c22h',
+    name: 'Curve 22" R · 11.25°',
+    kind: 'curve',
+    R: 22,
+    deg: 11.25
+  }, {
+    g: 'Curves',
+    id: 'c26',
+    name: 'Curve 26" R · 15°',
+    kind: 'curve',
+    R: 26,
+    deg: 15
+  }, {
+    g: 'Turnouts',
+    id: 'tl',
+    name: 'Turnout left · 18" R',
+    kind: 'turnout',
+    R: 18,
+    deg: 30,
+    L: 9,
+    side: 1
+  }, {
+    g: 'Turnouts',
+    id: 'tr',
+    name: 'Turnout right · 18" R',
+    kind: 'turnout',
+    R: 18,
+    deg: 30,
+    L: 9,
+    side: -1
+  }, {
+    g: 'Turnouts',
+    id: 'tl22',
+    name: 'Turnout left · 22" R',
+    kind: 'turnout',
+    R: 22,
+    deg: 22.5,
+    L: 9,
+    side: 1
+  }, {
+    g: 'Turnouts',
+    id: 'tr22',
+    name: 'Turnout right · 22" R',
+    kind: 'turnout',
+    R: 22,
+    deg: 22.5,
+    L: 9,
+    side: -1
+  }, {
+    g: 'Crossings & ends',
+    id: 'x90',
+    name: 'Crossing 90°',
+    kind: 'cross',
+    L: 9,
+    deg: 90
+  }, {
+    g: 'Crossings & ends',
+    id: 'x30',
+    name: 'Crossing 30°',
+    kind: 'cross',
+    L: 9,
+    deg: 30
+  }, {
+    g: 'Crossings & ends',
+    id: 'bmp',
+    name: 'Bumper (end stop)',
+    kind: 'bumper'
+  }];
+  var toObj = function toObj(pairs) {
+    var o = {};
+    pairs.forEach(function (_ref) {
+      var _ref2 = _slicedToArray(_ref, 2),
+        k = _ref2[0],
+        v = _ref2[1];
+      o[k] = v;
+    });
+    return o;
+  };
+  var DEF = toObj(DEFS.map(function (d) {
+    return [d.id, d];
+  }));
+  function arcPts(R, deg, side) {
+    var th = deg * D2R,
+      n = Math.max(4, Math.ceil(deg / 1.5)),
+      p = [];
+    for (var i = 0; i <= n; i++) {
+      var t = th * i / n;
+      p.push([R * Math.sin(t), -side * R * (1 - Math.cos(t))]);
+    }
+    return p;
+  }
+  function geom(d) {
+    var P = function P(x, y, a) {
+      return {
+        x,
+        y,
+        a: norm(a)
+      };
+    };
+    if (d.kind === 'straight') return {
+      ports: [P(0, 0, PI), P(d.L, 0, 0)],
+      paths: [[[0, 0], [d.L, 0]]]
+    };
+    if (d.kind === 'curve') {
+      var a = arcPts(d.R, d.deg, 1),
+        e = a[a.length - 1];
+      return {
+        ports: [P(0, 0, PI), P(e[0], e[1], -d.deg * D2R)],
+        paths: [a]
+      };
+    }
+    if (d.kind === 'turnout') {
+      var _a = arcPts(d.R, d.deg, d.side),
+        _e = _a[_a.length - 1];
+      return {
+        ports: [P(0, 0, PI), P(d.L, 0, 0), P(_e[0], _e[1], -d.side * d.deg * D2R)],
+        paths: [[[0, 0], [d.L, 0]], _a]
+      };
+    }
+    if (d.kind === 'cross') {
+      var h = d.L / 2,
+        c = Math.cos(d.deg * D2R),
+        s = Math.sin(d.deg * D2R);
+      var e1 = [h - h * c, h * s],
+        e2 = [h + h * c, -h * s];
+      return {
+        ports: [P(0, 0, PI), P(d.L, 0, 0), P(e1[0], e1[1], Math.atan2(h * s, -h * c)), P(e2[0], e2[1], Math.atan2(-h * s, h * c))],
+        paths: [[[0, 0], [d.L, 0]], [e1, e2]]
+      };
+    }
+    if (d.kind === 'bumper') return {
+      ports: [P(0, 0, PI)],
+      paths: [[[0, 0], [2.5, 0]]],
+      bumper: true
+    };
+  }
+  var GEO = toObj(DEFS.map(function (d) {
+    return [d.id, geom(d)];
+  }));
+  var pathLen = function pathLen(p) {
+    var L = 0;
+    for (var i = 1; i < p.length; i++) L += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+    return L;
+  };
+  var KEY = 'ho-track-planner-v1';
+  var defaultShapes = function defaultShapes() {
+    return [{
+      id: 1,
+      kind: 'rect',
+      role: 'table',
+      x: 0,
+      y: 0,
+      w: 96,
+      h: 48
+    }, {
+      id: 2,
+      kind: 'ellipse',
+      role: 'hole',
+      x: 30,
+      y: 17,
+      w: 36,
+      h: 14
+    }];
+  };
+  var S = {
+    shapes: defaultShapes(),
+    pieces: [],
+    grid: 1
+  };
+  var snapG = function snapG(v) {
+    return S.grid > 0 ? Math.round(v / S.grid) * S.grid : v;
+  };
+  var snapShape = function snapShape(v) {
+    var g = S.grid > 0 ? S.grid : 0.5;
+    return Math.round(v / g) * g;
+  };
+  var nextId = 1,
+    selected = null,
+    activeEnd = null,
+    undo = [];
+  var nextShape = 3,
+    mode = 'track',
+    selShape = null;
+  var moveMode = 'piece';
+  try {
+    if (localStorage.getItem('ho-move-mode') === 'section') moveMode = 'section';
+  } catch (e) {}
+  function movingSet(p, link) {
+    return moveMode === 'section' ? groupOf(p.id, link || connections().link) : [p];
+  }
+  var shapeById = function shapeById(id) {
+    return S.shapes.find(function (s) {
+      return s.id === id;
+    });
+  };
+  function bounds() {
+    var t = S.shapes.filter(function (s) {
+      return s.role === 'table';
+    });
+    var L = t.length ? t : S.shapes;
+    if (!L.length) return {
+      x: 0,
+      y: 0,
+      w: 96,
+      h: 48
+    };
+    var x0 = Math.min.apply(Math, _toConsumableArray(L.map(function (s) {
+        return s.x;
+      }))),
+      y0 = Math.min.apply(Math, _toConsumableArray(L.map(function (s) {
+        return s.y;
+      }))),
+      x1 = Math.max.apply(Math, _toConsumableArray(L.map(function (s) {
+        return s.x + s.w;
+      }))),
+      y1 = Math.max.apply(Math, _toConsumableArray(L.map(function (s) {
+        return s.y + s.h;
+      })));
+    return {
+      x: x0,
+      y: y0,
+      w: Math.max(1, x1 - x0),
+      h: Math.max(1, y1 - y0)
+    };
+  }
+  function inShape(s, x, y) {
+    var m = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : 0;
+    if (s.kind === 'rect') return x >= s.x - m && x <= s.x + s.w + m && y >= s.y - m && y <= s.y + s.h + m;
+    var r = Math.min(s.w, s.h) / 2,
+      cx = Math.max(s.x + r, Math.min(s.x + s.w - r, x)),
+      cy = Math.max(s.y + r, Math.min(s.y + s.h - r, y));
+    return Math.hypot(x - cx, y - cy) <= r + m;
+  }
+  var byId = function byId(id) {
+    return S.pieces.find(function (p) {
+      return p.id === id;
+    });
+  };
+  function lp(p, i) {
+    var g = GEO[p.def].ports[i];
+    return p.flip ? {
+      x: g.x,
+      y: -g.y,
+      a: norm(-g.a)
+    } : g;
+  }
+  function wp(p, i) {
+    var l = lp(p, i),
+      c = Math.cos(p.rot),
+      s = Math.sin(p.rot);
+    return {
+      x: p.x + l.x * c - l.y * s,
+      y: p.y + l.x * s + l.y * c,
+      a: norm(l.a + p.rot)
+    };
+  }
+  function wpaths(p) {
+    var c = Math.cos(p.rot),
+      s = Math.sin(p.rot),
+      f = p.flip ? -1 : 1;
+    return GEO[p.def].paths.map(function (path) {
+      return path.map(function (_ref3) {
+        var _ref4 = _slicedToArray(_ref3, 2),
+          x = _ref4[0],
+          y = _ref4[1];
+        y *= f;
+        return [p.x + x * c - y * s, p.y + x * s + y * c];
+      });
+    });
+  }
+  function placeAttached(p, i, t) {
+    var l = lp(p, i);
+    p.rot = norm(t.a + PI - l.a);
+    p.x = 0;
+    p.y = 0;
+    var w = wp(p, i);
+    p.x = t.x - w.x;
+    p.y = t.y - w.y;
+  }
+  function newPiece(def) {
+    var flip = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : false;
+    return {
+      id: nextId++,
+      def,
+      x: 0,
+      y: 0,
+      rot: 0,
+      flip
+    };
+  }
+  function connections() {
+    var ports = [];
+    var _iterator = _createForOfIteratorHelper(S.pieces),
+      _step;
+    try {
+      for (_iterator.s(); !(_step = _iterator.n()).done;) {
+        var p = _step.value;
+        var n = GEO[p.def].ports.length;
+        for (var i = 0; i < n; i++) ports.push(_objectSpread({
+          pid: p.id,
+          i
+        }, wp(p, i)));
+      }
+    } catch (err) {
+      _iterator.e(err);
+    } finally {
+      _iterator.f();
+    }
+    var link = new Map();
+    for (var a = 0; a < ports.length; a++) for (var b = a + 1; b < ports.length; b++) {
+      var A = ports[a],
+        B = ports[b];
+      if (A.pid === B.pid) continue;
+      if (Math.hypot(A.x - B.x, A.y - B.y) < 0.12) {
+        var d = Math.abs(norm(A.a - B.a) - PI);
+        if (d < 0.06) {
+          link.set(A.pid + ':' + A.i, B);
+          link.set(B.pid + ':' + B.i, A);
+        }
+      }
+    }
+    return {
+      ports,
+      link
+    };
+  }
+  function groupOf(id, link) {
+    var seen = new Set([id]),
+      q = [id];
+    while (q.length) {
+      var pid = q.pop(),
+        p = byId(pid);
+      var n = GEO[p.def].ports.length;
+      for (var i = 0; i < n; i++) {
+        var o = link.get(pid + ':' + i);
+        if (o && !seen.has(o.pid)) {
+          seen.add(o.pid);
+          q.push(o.pid);
+        }
+      }
+    }
+    return _toConsumableArray(seen).map(byId);
+  }
+  function rotateGroup(g, d, px, py) {
+    var c = Math.cos(d),
+      s = Math.sin(d);
+    var _iterator2 = _createForOfIteratorHelper(g),
+      _step2;
+    try {
+      for (_iterator2.s(); !(_step2 = _iterator2.n()).done;) {
+        var p = _step2.value;
+        var dx = p.x - px,
+          dy = p.y - py;
+        p.x = px + dx * c - dy * s;
+        p.y = py + dx * s + dy * c;
+        p.rot = norm(p.rot + d);
+      }
+    } catch (err) {
+      _iterator2.e(err);
+    } finally {
+      _iterator2.f();
+    }
+  }
+  var redo = [];
+  function histUI() {
+    ui.undo.disabled = !undo.length;
+    ui.redo.disabled = !redo.length;
+  }
+  function snap() {
+    undo.push(JSON.stringify(S));
+    if (undo.length > 100) undo.shift();
+    redo = [];
+    histUI();
+  }
+  function save() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(S));
+    } catch (e) {}
+  }
+  function loadState(obj) {
+    if (!obj || !Array.isArray(obj.pieces)) throw new Error('bad');
+    var shapes;
+    if (Array.isArray(obj.shapes)) shapes = obj.shapes.filter(function (s) {
+      return s && (s.kind === 'rect' || s.kind === 'ellipse' || s.kind === 'circle');
+    }).map(function (s) {
+      return {
+        id: +s.id,
+        kind: s.kind,
+        role: s.role === 'hole' ? 'hole' : 'table',
+        x: +s.x,
+        y: +s.y,
+        w: Math.max(1, +s.w),
+        h: Math.max(1, +s.h)
+      };
+    });else if (obj.table) {
+      var t = obj.table;
+      shapes = [{
+        id: 1,
+        kind: 'rect',
+        role: 'table',
+        x: 0,
+        y: 0,
+        w: +t.L || 96,
+        h: +t.W || 48
+      }];
+      if (t.cw > 0 && t.ch > 0) shapes.push({
+        id: 2,
+        kind: 'ellipse',
+        role: 'hole',
+        x: t.cx - t.cw / 2,
+        y: t.cy - t.ch / 2,
+        w: +t.cw,
+        h: +t.ch
+      });
+    } else throw new Error('bad');
+    nextShape = Math.max.apply(Math, [0].concat(_toConsumableArray(shapes.map(function (s) {
+      return s.id;
+    })))) + 1;
+    if (!shapes.some(function (s) {
+      return s.id === selShape;
+    })) selShape = null;
+    var grid = [0, 0.5, 1, 2, 3, 6, 12].includes(+obj.grid) ? +obj.grid : 1;
+    S = {
+      shapes,
+      grid,
+      pieces: obj.pieces.filter(function (p) {
+        return DEF[p.def];
+      }).map(function (p) {
+        return {
+          id: +p.id,
+          def: p.def,
+          x: +p.x,
+          y: +p.y,
+          rot: +p.rot,
+          flip: !!p.flip
+        };
+      })
+    };
+    nextId = Math.max.apply(Math, [0].concat(_toConsumableArray(S.pieces.map(function (p) {
+      return p.id;
+    })))) + 1;
+    selected = null;
+    activeEnd = null;
+  }
+  function sample() {
+    S.pieces = [];
+    nextId = 1;
+    var bb = bounds(),
+      seq = [].concat(_toConsumableArray(Array(4).fill('s9')), _toConsumableArray(Array(8).fill('c22')), _toConsumableArray(Array(4).fill('s9')), _toConsumableArray(Array(8).fill('c22')));
+    var prev = null;
+    var _iterator3 = _createForOfIteratorHelper(seq),
+      _step3;
+    try {
+      for (_iterator3.s(); !(_step3 = _iterator3.n()).done;) {
+        var id = _step3.value;
+        var p = newPiece(id);
+        if (!prev) {
+          p.x = bb.x + bb.w / 2 - 18;
+          p.y = bb.y + bb.h / 2 + 22;
+          p.rot = 0;
+        } else placeAttached(p, 0, wp(prev, 1));
+        S.pieces.push(p);
+        prev = p;
+      }
+    } catch (err) {
+      _iterator3.e(err);
+    } finally {
+      _iterator3.f();
+    }
+    selected = null;
+    activeEnd = null;
+  }
+  var cv = document.getElementById('cv'),
+    ctx = cv.getContext('2d'),
+    stage = document.getElementById('stage');
+  var W = 0,
+    H = 0,
+    dpr = 1,
+    view = {
+      s: 8,
+      ox: 0,
+      oy: 0
+    },
+    fitted = false,
+    C = {};
+  function readColors() {
+    var cs = getComputedStyle(document.documentElement);
+    for (var _i = 0, _arr = ['bg', 'ink', 'muted', 'line', 'accent', 'mat', 'mat-edge', 'grid', 'grid-strong', 'ballast', 'tie', 'rail', 'warn', 'panel']; _i < _arr.length; _i++) {
+      var k = _arr[_i];
+      C[k] = cs.getPropertyValue('--' + k).trim();
+    }
+  }
+  function fit() {
+    var b = bounds(),
+      pad = W < 500 ? 28 : 44,
+      top = 76;
+    view.s = Math.max(1.5, Math.min((W - pad * 2) / b.w, (H - top - pad) / b.h));
+    view.ox = (W - b.w * view.s) / 2 - b.x * view.s;
+    view.oy = top + (H - top - pad - b.h * view.s) / 2 - b.y * view.s;
+  }
+  function resize() {
+    var r = stage.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width;
+    H = r.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    if (!fitted) {
+      fit();
+      fitted = true;
+    }
+    render();
+  }
+  var toWorld = function toWorld(sx, sy) {
+    return {
+      x: (sx - view.ox) / view.s,
+      y: (sy - view.oy) / view.s
+    };
+  };
+  function walk(pts, step, cb) {
+    var carry = step / 2;
+    for (var i = 1; i < pts.length; i++) {
+      var _pts = _slicedToArray(pts[i - 1], 2),
+        x0 = _pts[0],
+        y0 = _pts[1],
+        _pts$i = _slicedToArray(pts[i], 2),
+        x1 = _pts$i[0],
+        y1 = _pts$i[1],
+        L = Math.hypot(x1 - x0, y1 - y0);
+      if (!L) continue;
+      var tx = (x1 - x0) / L,
+        ty = (y1 - y0) / L;
+      var d = carry;
+      while (d <= L) {
+        cb(x0 + tx * d, y0 + ty * d, tx, ty);
+        d += step;
+      }
+      carry = d - L;
+    }
+  }
+  function offsetLine(pts, o) {
+    return pts.map(function (pt, i) {
+      var a = pts[Math.max(0, i - 1)],
+        b = pts[Math.min(pts.length - 1, i + 1)];
+      var dx = b[0] - a[0],
+        dy = b[1] - a[1],
+        L = Math.hypot(dx, dy) || 1;
+      return [pt[0] - dy / L * o, pt[1] + dx / L * o];
+    });
+  }
+  var fmt = function fmt(v) {
+    return (Math.round(v * 2) / 2).toString();
+  };
+  function addShape(q, g) {
+    if (q.kind === 'rect') {
+      ctx.rect(q.x - g, q.y - g, q.w + 2 * g, q.h + 2 * g);
+      return;
+    }
+    var x = q.x - g,
+      y = q.y - g,
+      w = Math.max(0.02, q.w + 2 * g),
+      h = Math.max(0.02, q.h + 2 * g),
+      r = Math.min(w, h) / 2;
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+  var corners = function corners(q) {
+    return [[q.x, q.y], [q.x + q.w, q.y], [q.x, q.y + q.h], [q.x + q.w, q.y + q.h]];
+  };
+  function stroke(pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+  function problems() {
+    var m = 0.9,
+      bad = new Set();
+    var tables = S.shapes.filter(function (s) {
+        return s.role === 'table';
+      }),
+      holes = S.shapes.filter(function (s) {
+        return s.role === 'hole';
+      });
+    var onTable = function onTable(x, y) {
+      return tables.some(function (s) {
+        return inShape(s, x, y);
+      });
+    };
+    var _iterator4 = _createForOfIteratorHelper(S.pieces),
+      _step4;
+    try {
+      for (_iterator4.s(); !(_step4 = _iterator4.n()).done;) {
+        var p = _step4.value;
+        var _iterator5 = _createForOfIteratorHelper(wpaths(p)),
+          _step5;
+        try {
+          var _loop = function _loop() {
+            var path = _step5.value;
+            var hit = false;
+            walk(path, 0.5, function (x, y) {
+              if (hit) return;
+              if (!onTable(x, y) || !onTable(x - m, y) || !onTable(x + m, y) || !onTable(x, y - m) || !onTable(x, y + m)) hit = true;else if (holes.some(function (h) {
+                return inShape(h, x, y, m);
+              })) hit = true;
+            });
+            if (hit) {
+              bad.add(p.id);
+              return 1;
+            }
+          };
+          for (_iterator5.s(); !(_step5 = _iterator5.n()).done;) {
+            if (_loop()) break;
+          }
+        } catch (err) {
+          _iterator5.e(err);
+        } finally {
+          _iterator5.f();
+        }
+      }
+    } catch (err) {
+      _iterator4.e(err);
+    } finally {
+      _iterator4.f();
+    }
+    return bad;
+  }
+  var cache = {
+    link: new Map(),
+    ports: [],
+    bad: new Set()
+  };
+  function render() {
+    var _connections = connections(),
+      link = _connections.link,
+      ports = _connections.ports;
+    var bad = problems();
+    cache = {
+      link,
+      ports,
+      bad
+    };
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+    var s = view.s,
+      bb = bounds(),
+      editing = mode === 'shapes';
+    ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * view.ox, dpr * view.oy);
+    var tables = S.shapes.filter(function (q) {
+        return q.role === 'table';
+      }),
+      holes = S.shapes.filter(function (q) {
+        return q.role === 'hole';
+      });
+    var edge = Math.max(0.3, 1.6 / s);
+    ctx.fillStyle = C['mat-edge'];
+    var _iterator6 = _createForOfIteratorHelper(tables),
+      _step6;
+    try {
+      for (_iterator6.s(); !(_step6 = _iterator6.n()).done;) {
+        var _q3 = _step6.value;
+        ctx.beginPath();
+        addShape(_q3, edge);
+        ctx.fill();
+      }
+    } catch (err) {
+      _iterator6.e(err);
+    } finally {
+      _iterator6.f();
+    }
+    ctx.fillStyle = C.mat;
+    var _iterator7 = _createForOfIteratorHelper(tables),
+      _step7;
+    try {
+      for (_iterator7.s(); !(_step7 = _iterator7.n()).done;) {
+        var _q4 = _step7.value;
+        ctx.beginPath();
+        addShape(_q4, 0);
+        ctx.fill();
+      }
+    } catch (err) {
+      _iterator7.e(err);
+    } finally {
+      _iterator7.f();
+    }
+    if (tables.length) {
+      ctx.save();
+      ctx.beginPath();
+      tables.forEach(function (q) {
+        return addShape(q, 0);
+      });
+      ctx.clip();
+      ctx.lineWidth = 1 / s;
+      var g = S.grid;
+      if (g > 0 && g < 6 && g * s >= 6) {
+        ctx.strokeStyle = C.grid;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        for (var x = Math.floor(bb.x / g) * g; x <= bb.x + bb.w; x += g) {
+          if (Math.abs(x / 6 - Math.round(x / 6)) < 1e-6) continue;
+          ctx.moveTo(x, bb.y);
+          ctx.lineTo(x, bb.y + bb.h);
+        }
+        for (var y = Math.floor(bb.y / g) * g; y <= bb.y + bb.h; y += g) {
+          if (Math.abs(y / 6 - Math.round(y / 6)) < 1e-6) continue;
+          ctx.moveTo(bb.x, y);
+          ctx.lineTo(bb.x + bb.w, y);
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      var gx0 = Math.floor(bb.x / 6) * 6,
+        gy0 = Math.floor(bb.y / 6) * 6;
+      for (var _x = gx0; _x <= bb.x + bb.w; _x += 6) {
+        ctx.strokeStyle = _x % 12 === 0 ? C['grid-strong'] : C.grid;
+        ctx.beginPath();
+        ctx.moveTo(_x, bb.y);
+        ctx.lineTo(_x, bb.y + bb.h);
+        ctx.stroke();
+      }
+      for (var _y = gy0; _y <= bb.y + bb.h; _y += 6) {
+        ctx.strokeStyle = _y % 12 === 0 ? C['grid-strong'] : C.grid;
+        ctx.beginPath();
+        ctx.moveTo(bb.x, _y);
+        ctx.lineTo(bb.x + bb.w, _y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    var _iterator8 = _createForOfIteratorHelper(holes),
+      _step8;
+    try {
+      for (_iterator8.s(); !(_step8 = _iterator8.n()).done;) {
+        var _q5 = _step8.value;
+        ctx.fillStyle = C.bg;
+        ctx.beginPath();
+        addShape(_q5, 0);
+        ctx.fill();
+        ctx.setLineDash([1.2, 0.8]);
+        ctx.strokeStyle = C['mat-edge'];
+        ctx.lineWidth = Math.max(0.2, 1.5 / s);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    } catch (err) {
+      _iterator8.e(err);
+    } finally {
+      _iterator8.f();
+    }
+    ctx.globalAlpha = editing ? 0.35 : 1;
+    var all = S.pieces.map(function (p) {
+      return {
+        p,
+        paths: wpaths(p)
+      };
+    });
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'round';
+    var _iterator9 = _createForOfIteratorHelper(all),
+      _step9;
+    try {
+      for (_iterator9.s(); !(_step9 = _iterator9.n()).done;) {
+        var _step9$value = _step9.value,
+          p = _step9$value.p,
+          paths = _step9$value.paths;
+        if (p.id === selected) {
+          ctx.strokeStyle = C.accent;
+          ctx.lineWidth = 2.7;
+          paths.forEach(stroke);
+        }
+      }
+    } catch (err) {
+      _iterator9.e(err);
+    } finally {
+      _iterator9.f();
+    }
+    var _iterator0 = _createForOfIteratorHelper(all),
+      _step0;
+    try {
+      for (_iterator0.s(); !(_step0 = _iterator0.n()).done;) {
+        var _step0$value = _step0.value,
+          _p = _step0$value.p,
+          _paths = _step0$value.paths;
+        ctx.strokeStyle = bad.has(_p.id) ? C.warn : C.ballast;
+        ctx.lineWidth = 1.9;
+        _paths.forEach(stroke);
+      }
+    } catch (err) {
+      _iterator0.e(err);
+    } finally {
+      _iterator0.f();
+    }
+    ctx.strokeStyle = C.tie;
+    ctx.lineWidth = 0.18;
+    var _iterator1 = _createForOfIteratorHelper(all),
+      _step1;
+    try {
+      for (_iterator1.s(); !(_step1 = _iterator1.n()).done;) {
+        var _paths2 = _step1.value.paths;
+        var _iterator15 = _createForOfIteratorHelper(_paths2),
+          _step15;
+        try {
+          for (_iterator15.s(); !(_step15 = _iterator15.n()).done;) {
+            var path = _step15.value;
+            ctx.beginPath();
+            walk(path, 0.42, function (x, y, tx, ty) {
+              ctx.moveTo(x - ty * 0.62, y + tx * 0.62);
+              ctx.lineTo(x + ty * 0.62, y - tx * 0.62);
+            });
+            ctx.stroke();
+          }
+        } catch (err) {
+          _iterator15.e(err);
+        } finally {
+          _iterator15.f();
+        }
+      }
+    } catch (err) {
+      _iterator1.e(err);
+    } finally {
+      _iterator1.f();
+    }
+    ctx.strokeStyle = C.rail;
+    ctx.lineWidth = Math.max(0.11, 1 / s);
+    var _iterator10 = _createForOfIteratorHelper(all),
+      _step10;
+    try {
+      for (_iterator10.s(); !(_step10 = _iterator10.n()).done;) {
+        var _paths3 = _step10.value.paths;
+        var _iterator16 = _createForOfIteratorHelper(_paths3),
+          _step16;
+        try {
+          for (_iterator16.s(); !(_step16 = _iterator16.n()).done;) {
+            var _path = _step16.value;
+            stroke(offsetLine(_path, 0.325));
+            stroke(offsetLine(_path, -0.325));
+          }
+        } catch (err) {
+          _iterator16.e(err);
+        } finally {
+          _iterator16.f();
+        }
+      }
+    } catch (err) {
+      _iterator10.e(err);
+    } finally {
+      _iterator10.f();
+    }
+    var _iterator11 = _createForOfIteratorHelper(all),
+      _step11;
+    try {
+      for (_iterator11.s(); !(_step11 = _iterator11.n()).done;) {
+        var _step11$value = _step11.value,
+          _p2 = _step11$value.p,
+          _paths4 = _step11$value.paths;
+        if (GEO[_p2.def].bumper) {
+          var _pt = _paths4[0],
+            e = _pt[1],
+            d = [e[0] - _pt[0][0], e[1] - _pt[0][1]],
+            _L2 = Math.hypot.apply(Math, d);
+          ctx.strokeStyle = C.warn;
+          ctx.lineWidth = 0.6;
+          ctx.beginPath();
+          ctx.moveTo(e[0] + d[1] / _L2 * 0.9, e[1] - d[0] / _L2 * 0.9);
+          ctx.lineTo(e[0] - d[1] / _L2 * 0.9, e[1] + d[0] / _L2 * 0.9);
+          ctx.stroke();
+        }
+      }
+    } catch (err) {
+      _iterator11.e(err);
+    } finally {
+      _iterator11.f();
+    }
+    ctx.globalAlpha = 1;
+    var selP = !editing && byId(selected);
+    if (selP) {
+      var o = wp(selP, 0),
+        L = Math.max(1.2, 12 / s);
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = Math.max(0.15, 2 / s);
+      ctx.beginPath();
+      ctx.moveTo(o.x - L, o.y);
+      ctx.lineTo(o.x + L, o.y);
+      ctx.moveTo(o.x, o.y - L);
+      ctx.lineTo(o.x, o.y + L);
+      ctx.stroke();
+    }
+    var r = Math.max(0.55, 7 / s);
+    if (!editing) {
+      var _iterator12 = _createForOfIteratorHelper(ports),
+        _step12;
+      try {
+        for (_iterator12.s(); !(_step12 = _iterator12.n()).done;) {
+          var pt = _step12.value;
+          if (link.has(pt.pid + ':' + pt.i)) continue;
+          var act = activeEnd && activeEnd.pid === pt.pid && activeEnd.i === pt.i;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, act ? r * 1.5 : r, 0, TAU);
+          ctx.fillStyle = act ? C.accent : C.panel;
+          ctx.fill();
+          ctx.lineWidth = Math.max(0.15, 1.6 / s);
+          ctx.strokeStyle = C.accent;
+          ctx.stroke();
+          if (act) {
+            var _L = r * 3.2;
+            ctx.beginPath();
+            ctx.moveTo(pt.x, pt.y);
+            ctx.lineTo(pt.x + Math.cos(pt.a) * _L, pt.y + Math.sin(pt.a) * _L);
+            ctx.lineWidth = Math.max(0.2, 2 / s);
+            ctx.stroke();
+          }
+        }
+      } catch (err) {
+        _iterator12.e(err);
+      } finally {
+        _iterator12.f();
+      }
+    }
+    if (editing) {
+      ctx.setLineDash([]);
+      var _iterator13 = _createForOfIteratorHelper(S.shapes),
+        _step13;
+      try {
+        for (_iterator13.s(); !(_step13 = _iterator13.n()).done;) {
+          var _q2 = _step13.value;
+          if (_q2.id === selShape) continue;
+          ctx.beginPath();
+          addShape(_q2, 0);
+          ctx.strokeStyle = C.ink;
+          ctx.globalAlpha = 0.45;
+          ctx.lineWidth = 1 / s;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      } catch (err) {
+        _iterator13.e(err);
+      } finally {
+        _iterator13.f();
+      }
+      var _q = shapeById(selShape);
+      if (_q) {
+        ctx.beginPath();
+        addShape(_q, 0);
+        ctx.strokeStyle = C.accent;
+        ctx.lineWidth = 2 / s;
+        ctx.stroke();
+        if (_q.kind !== 'rect') {
+          ctx.setLineDash([4 / s, 3 / s]);
+          ctx.lineWidth = 1 / s;
+          ctx.strokeRect(_q.x, _q.y, _q.w, _q.h);
+          ctx.setLineDash([]);
+        }
+        var hs = 7 / s;
+        ctx.fillStyle = C.panel;
+        ctx.lineWidth = 1.6 / s;
+        var _iterator14 = _createForOfIteratorHelper(corners(_q)),
+          _step14;
+        try {
+          for (_iterator14.s(); !(_step14 = _iterator14.n()).done;) {
+            var _step14$value = _slicedToArray(_step14.value, 2),
+              hx = _step14$value[0],
+              hy = _step14$value[1];
+            ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+            ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
+          }
+        } catch (err) {
+          _iterator14.e(err);
+        } finally {
+          _iterator14.f();
+        }
+      }
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = C.muted;
+    ctx.font = '10px "IBM Plex Mono",ui-monospace,monospace';
+    var every = s < 4 ? 24 : 12;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    for (var _x2 = Math.ceil(bb.x / every) * every; _x2 <= bb.x + bb.w + 0.01; _x2 += every) ctx.fillText(_x2 + '"', view.ox + _x2 * s, view.oy + bb.y * s - 4);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (var _y2 = Math.ceil(bb.y / every) * every; _y2 <= bb.y + bb.h + 0.01; _y2 += every) ctx.fillText(_y2 + '"', view.ox + bb.x * s - 5, view.oy + _y2 * s);
+    var q = editing && shapeById(selShape);
+    if (q) {
+      ctx.font = '600 12px "IBM Plex Mono",ui-monospace,monospace';
+      var lab = function lab(txt, x, y) {
+        var w = ctx.measureText(txt).width + 10;
+        ctx.fillStyle = C.accent;
+        ctx.fillRect(x - w / 2, y - 9, w, 18);
+        ctx.fillStyle = '#1c1407';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(txt, x, y);
+      };
+      var X = view.ox + q.x * s,
+        Y = view.oy + q.y * s,
+        Wd = q.w * s,
+        Hd = q.h * s;
+      if (q.kind === 'circle') lab('⌀ ' + fmt(q.w) + '"', X + Wd / 2, Y - 14);else {
+        lab(fmt(q.w) + '"', X + Wd / 2, Y - 14);
+        lab(fmt(q.h) + '"', X + Wd + 24, Y + Hd / 2);
+      }
+    }
+    updatePanels();
+  }
+  function segDist(px, py, a, b) {
+    var dx = b[0] - a[0],
+      dy = b[1] - a[1],
+      L2 = dx * dx + dy * dy;
+    var u = L2 ? ((px - a[0]) * dx + (py - a[1]) * dy) / L2 : 0;
+    u = Math.max(0, Math.min(1, u));
+    return Math.hypot(px - a[0] - u * dx, py - a[1] - u * dy);
+  }
+  function hitPort(w) {
+    var tol = Math.max(1.1, 22 / view.s);
+    var best = null,
+      bd = tol;
+    var _iterator17 = _createForOfIteratorHelper(cache.ports),
+      _step17;
+    try {
+      for (_iterator17.s(); !(_step17 = _iterator17.n()).done;) {
+        var pt = _step17.value;
+        if (cache.link.has(pt.pid + ':' + pt.i)) continue;
+        var d = Math.hypot(pt.x - w.x, pt.y - w.y);
+        if (d < bd) {
+          bd = d;
+          best = pt;
+        }
+      }
+    } catch (err) {
+      _iterator17.e(err);
+    } finally {
+      _iterator17.f();
+    }
+    return best;
+  }
+  function hitPiece(w) {
+    var tol = Math.max(1.1, 20 / view.s);
+    var best = null,
+      bd = tol;
+    var _iterator18 = _createForOfIteratorHelper(S.pieces),
+      _step18;
+    try {
+      for (_iterator18.s(); !(_step18 = _iterator18.n()).done;) {
+        var p = _step18.value;
+        var _iterator19 = _createForOfIteratorHelper(wpaths(p)),
+          _step19;
+        try {
+          for (_iterator19.s(); !(_step19 = _iterator19.n()).done;) {
+            var path = _step19.value;
+            for (var i = 1; i < path.length; i++) {
+              var d = segDist(w.x, w.y, path[i - 1], path[i]);
+              if (d < bd) {
+                bd = d;
+                best = p;
+              }
+            }
+          }
+        } catch (err) {
+          _iterator19.e(err);
+        } finally {
+          _iterator19.f();
+        }
+      }
+    } catch (err) {
+      _iterator18.e(err);
+    } finally {
+      _iterator18.f();
+    }
+    return best;
+  }
+  function firstOpen(p, skip) {
+    var n = GEO[p.def].ports.length;
+    var _connections2 = connections(),
+      link = _connections2.link;
+    for (var k = 1; k <= n; k++) {
+      var i = (skip + k) % n;
+      if (!link.has(p.id + ':' + i)) return {
+        pid: p.id,
+        i
+      };
+    }
+    return null;
+  }
+  function addPiece(def) {
+    setMode('track', true);
+    snap();
+    var p = newPiece(def);
+    var target = null;
+    if (activeEnd) {
+      var o = byId(activeEnd.pid);
+      if (o && !cache.link.has(activeEnd.pid + ':' + activeEnd.i)) target = wp(o, activeEnd.i);
+    }
+    if (target) {
+      placeAttached(p, 0, target);
+    } else {
+      var c = toWorld(W / 2, H / 2),
+        b = bounds();
+      p.x = snapG(Math.max(b.x + 2, Math.min(b.x + b.w - 12, c.x - 4)));
+      p.y = snapG(b.y + 5);
+    }
+    S.pieces.push(p);
+    selected = p.id;
+    activeEnd = firstOpen(p, 0);
+    save();
+    render();
+  }
+  function connOf(p) {
+    var _connections3 = connections(),
+      link = _connections3.link;
+    var n = GEO[p.def].ports.length;
+    for (var i = 0; i < n; i++) {
+      var o = link.get(p.id + ':' + i);
+      if (o) return {
+        i,
+        t: {
+          x: o.x,
+          y: o.y,
+          a: o.a
+        }
+      };
+    }
+    return null;
+  }
+  function doFlip() {
+    var p = byId(selected);
+    if (!p) return;
+    snap();
+    var c = connOf(p);
+    p.flip = !p.flip;
+    if (c) placeAttached(p, c.i, c.t);
+    activeEnd = firstOpen(p, c ? c.i : 0);
+    save();
+    render();
+  }
+  function doSwap() {
+    var p = byId(selected);
+    if (!p) return;
+    snap();
+    var n = GEO[p.def].ports.length;
+    var c = connOf(p);
+    if (c) {
+      var j = (c.i + 1) % n;
+      placeAttached(p, j, c.t);
+      activeEnd = firstOpen(p, j);
+    } else {
+      var w = wp(p, 0);
+      rotateGroup([p], PI, w.x, w.y);
+    }
+    save();
+    render();
+  }
+  function doRotate() {
+    var p = byId(selected);
+    if (!p) return;
+    snap();
+    var g = movingSet(p);
+    var w = wp(p, 0);
+    rotateGroup(g, 15 * D2R, w.x, w.y);
+    save();
+    render();
+  }
+  function doDelete() {
+    if (selected == null) return;
+    snap();
+    S.pieces = S.pieces.filter(function (p) {
+      return p.id !== selected;
+    });
+    if (activeEnd && activeEnd.pid === selected) activeEnd = null;
+    selected = null;
+    save();
+    render();
+  }
+  function doUndo() {
+    if (!undo.length) return;
+    redo.push(JSON.stringify(S));
+    loadState(JSON.parse(undo.pop()));
+    histUI();
+    save();
+    render();
+  }
+  function doRedo() {
+    if (!redo.length) return;
+    undo.push(JSON.stringify(S));
+    loadState(JSON.parse(redo.pop()));
+    histUI();
+    save();
+    render();
+  }
+  var ptrs = new Map();
+  var drag = null,
+    pan = null,
+    pinch = null;
+  function onDown(e) {
+    if (cv.setPointerCapture && e.pointerType) {
+      try {
+        cv.setPointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+    var r = cv.getBoundingClientRect();
+    var sx = e.clientX - r.left,
+      sy = e.clientY - r.top;
+    ptrs.set(e.pointerId, {
+      x: sx,
+      y: sy
+    });
+    if (ptrs.size === 2) {
+      drag = null;
+      pan = null;
+      var _ref5 = _toConsumableArray(ptrs.values()),
+        a = _ref5[0],
+        b = _ref5[1];
+      pinch = {
+        d: Math.hypot(a.x - b.x, a.y - b.y),
+        s: view.s,
+        mx: (a.x + b.x) / 2,
+        my: (a.y + b.y) / 2,
+        ox: view.ox,
+        oy: view.oy
+      };
+      return;
+    }
+    var w = toWorld(sx, sy);
+    if (mode === 'shapes') {
+      var sel = shapeById(selShape),
+        tol = Math.max(0.8, 12 / view.s);
+      if (sel) {
+        var ci = corners(sel).findIndex(function (_ref6) {
+          var _ref7 = _slicedToArray(_ref6, 2),
+            hx = _ref7[0],
+            hy = _ref7[1];
+          return Math.abs(hx - w.x) < tol && Math.abs(hy - w.y) < tol;
+        });
+        if (ci >= 0) {
+          var c = corners(sel)[3 - ci];
+          drag = {
+            shape: sel,
+            resize: true,
+            fx: c[0],
+            fy: c[1],
+            sx,
+            sy,
+            moved: false
+          };
+          return;
+        }
+      }
+      var hit = _toConsumableArray(S.shapes.filter(function (q) {
+        return q.role === 'hole';
+      })).reverse().find(function (q) {
+        return inShape(q, w.x, w.y, tol / 2);
+      }) || _toConsumableArray(S.shapes.filter(function (q) {
+        return q.role === 'table';
+      })).reverse().find(function (q) {
+        return inShape(q, w.x, w.y);
+      });
+      if (hit) {
+        selShape = hit.id;
+        drag = {
+          shape: hit,
+          sx,
+          sy,
+          start: w,
+          ox: hit.x,
+          oy: hit.y,
+          moved: false
+        };
+        render();
+        return;
+      }
+      selShape = null;
+      pan = {
+        sx,
+        sy,
+        ox: view.ox,
+        oy: view.oy
+      };
+      render();
+      return;
+    }
+    var port = hitPort(w);
+    var p = port ? byId(port.pid) : hitPiece(w);
+    if (p) {
+      selected = p.id;
+      var g = movingSet(p, cache.link);
+      drag = {
+        g,
+        sel: p,
+        sx,
+        sy,
+        start: w,
+        orig: g.map(function (q) {
+          return [q.x, q.y];
+        }),
+        moved: false,
+        fromPort: port ? {
+          pid: port.pid,
+          i: port.i
+        } : null
+      };
+      render();
+      return;
+    }
+    selected = null;
+    activeEnd = null;
+    pan = {
+      sx,
+      sy,
+      ox: view.ox,
+      oy: view.oy,
+      moved: false
+    };
+    render();
+  }
+  var coordsEl = document.getElementById('coords');
+  var fmtIn = function fmtIn(v) {
+    return (Math.round(v * 4) / 4).toFixed(2).replace(/\.?0+$/, '') + '"';
+  };
+  function showCoords(sx, sy) {
+    var w = toWorld(sx, sy),
+      dp = drag && drag.moved && drag.sel ? wp(drag.sel, 0) : null;
+    coordsEl.textContent = dp ? "Start  X ".concat(fmtIn(dp.x), "  Y ").concat(fmtIn(dp.y)) : "X ".concat(fmtIn(snapG(w.x)), "  Y ").concat(fmtIn(snapG(w.y)));
+  }
+  function onLeave() {
+    if (!drag) coordsEl.textContent = '';
+  }
+  function onMove(e) {
+    {
+      var _r = cv.getBoundingClientRect();
+      showCoords(e.clientX - _r.left, e.clientY - _r.top);
+    }
+    if (!ptrs.has(e.pointerId)) return;
+    var r = cv.getBoundingClientRect();
+    var sx = e.clientX - r.left,
+      sy = e.clientY - r.top;
+    ptrs.set(e.pointerId, {
+      x: sx,
+      y: sy
+    });
+    if (pinch && ptrs.size === 2) {
+      var _ref8 = _toConsumableArray(ptrs.values()),
+        a = _ref8[0],
+        b = _ref8[1];
+      var d = Math.hypot(a.x - b.x, a.y - b.y);
+      var ns = Math.max(1.5, Math.min(60, pinch.s * d / pinch.d));
+      var wx = (pinch.mx - pinch.ox) / pinch.s,
+        wy = (pinch.my - pinch.oy) / pinch.s,
+        mx = (a.x + b.x) / 2,
+        my = (a.y + b.y) / 2;
+      view.s = ns;
+      view.ox = mx - wx * ns;
+      view.oy = my - wy * ns;
+      render();
+      return;
+    }
+    if (drag && drag.shape) {
+      if (!drag.moved && Math.hypot(sx - drag.sx, sy - drag.sy) < 4) return;
+      if (!drag.moved) {
+        snap();
+        drag.moved = true;
+      }
+      var w = toWorld(sx, sy),
+        q = drag.shape,
+        sn = snapShape;
+      if (drag.resize) {
+        var nx = sn(w.x),
+          ny = sn(w.y);
+        if (q.kind === 'circle') {
+          var _d = Math.max(1, Math.abs(nx - drag.fx), Math.abs(ny - drag.fy));
+          nx = drag.fx + (nx < drag.fx ? -_d : _d);
+          ny = drag.fy + (ny < drag.fy ? -_d : _d);
+        }
+        q.x = Math.min(nx, drag.fx);
+        q.y = Math.min(ny, drag.fy);
+        q.w = Math.max(1, Math.abs(nx - drag.fx));
+        q.h = Math.max(1, Math.abs(ny - drag.fy));
+      } else {
+        q.x = sn(drag.ox + w.x - drag.start.x);
+        q.y = sn(drag.oy + w.y - drag.start.y);
+      }
+      render();
+      return;
+    }
+    if (drag) {
+      if (!drag.moved && Math.hypot(sx - drag.sx, sy - drag.sy) < 4) return;
+      if (!drag.moved) {
+        snap();
+        drag.moved = true;
+        activeEnd = null;
+        cv.style.cursor = 'grabbing';
+      }
+      var _w = toWorld(sx, sy);
+      var dx = _w.x - drag.start.x,
+        dy = _w.y - drag.start.y;
+      drag.g.forEach(function (q, i) {
+        q.x = drag.orig[i][0] + dx;
+        q.y = drag.orig[i][1] + dy;
+      });
+      if (S.grid > 0) {
+        var o = wp(drag.sel, 0),
+          ex = snapG(o.x) - o.x,
+          ey = snapG(o.y) - o.y;
+        drag.g.forEach(function (q) {
+          q.x += ex;
+          q.y += ey;
+        });
+      }
+      render();
+    } else if (pan) {
+      view.ox = pan.ox + sx - pan.sx;
+      view.oy = pan.oy + sy - pan.sy;
+      render();
+    }
+  }
+  function endPtr(e) {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinch = null;
+    if (drag && drag.moved) {
+      if (drag.g) snapGroup(drag.g);
+      save();
+    } else if (drag && drag.fromPort) activeEnd = drag.fromPort;
+    drag = null;
+    pan = null;
+    cv.style.cursor = 'default';
+    render();
+  }
+  if (window.PointerEvent) {
+    cv.addEventListener('pointerdown', onDown);
+    cv.addEventListener('pointermove', onMove);
+    cv.addEventListener('pointerup', endPtr);
+    cv.addEventListener('pointercancel', endPtr);
+    cv.addEventListener('pointerleave', onLeave);
+  } else {
+    var each = function each(fn) {
+      return function (ev) {
+        ev.preventDefault();
+        var t = ev.changedTouches;
+        for (var i = 0; i < t.length; i++) fn({
+          pointerId: 't' + t[i].identifier,
+          clientX: t[i].clientX,
+          clientY: t[i].clientY
+        });
+      };
+    };
+    cv.addEventListener('touchstart', each(onDown), {
+      passive: false
+    });
+    cv.addEventListener('touchmove', each(onMove), {
+      passive: false
+    });
+    cv.addEventListener('touchend', each(endPtr), {
+      passive: false
+    });
+    cv.addEventListener('touchcancel', each(endPtr), {
+      passive: false
+    });
+    var mouseDown = false;
+    var m = function m(ev) {
+      return {
+        pointerId: 'mouse',
+        clientX: ev.clientX,
+        clientY: ev.clientY
+      };
+    };
+    cv.addEventListener('mousedown', function (ev) {
+      mouseDown = true;
+      onDown(m(ev));
+    });
+    window.addEventListener('mousemove', function (ev) {
+      var r = cv.getBoundingClientRect();
+      if (mouseDown || ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) onMove(m(ev));
+    });
+    window.addEventListener('mouseup', function (ev) {
+      if (!mouseDown) return;
+      mouseDown = false;
+      endPtr(m(ev));
+    });
+    cv.addEventListener('mouseleave', onLeave);
+  }
+  function snapGroup(g) {
+    var ids = new Set(g.map(function (p) {
+      return p.id;
+    }));
+    var _connections4 = connections(),
+      ports = _connections4.ports,
+      link = _connections4.link;
+    var tol = Math.max(1.5, 26 / view.s);
+    var best = null,
+      bd = tol;
+    var _iterator20 = _createForOfIteratorHelper(ports),
+      _step20;
+    try {
+      for (_iterator20.s(); !(_step20 = _iterator20.n()).done;) {
+        var _a2 = _step20.value;
+        if (!ids.has(_a2.pid) || link.has(_a2.pid + ':' + _a2.i)) continue;
+        var _iterator22 = _createForOfIteratorHelper(ports),
+          _step22;
+        try {
+          for (_iterator22.s(); !(_step22 = _iterator22.n()).done;) {
+            var _b = _step22.value;
+            if (ids.has(_b.pid) || link.has(_b.pid + ':' + _b.i)) continue;
+            var d = Math.hypot(_a2.x - _b.x, _a2.y - _b.y);
+            if (d < bd) {
+              bd = d;
+              best = {
+                a: _a2,
+                b: _b
+              };
+            }
+          }
+        } catch (err) {
+          _iterator22.e(err);
+        } finally {
+          _iterator22.f();
+        }
+      }
+    } catch (err) {
+      _iterator20.e(err);
+    } finally {
+      _iterator20.f();
+    }
+    if (!best) return;
+    var _best = best,
+      a = _best.a,
+      b = _best.b;
+    rotateGroup(g, norm(b.a + PI - a.a), a.x, a.y);
+    var p = byId(a.pid),
+      w = wp(p, a.i),
+      dx = b.x - w.x,
+      dy = b.y - w.y;
+    var _iterator21 = _createForOfIteratorHelper(g),
+      _step21;
+    try {
+      for (_iterator21.s(); !(_step21 = _iterator21.n()).done;) {
+        var q = _step21.value;
+        q.x += dx;
+        q.y += dy;
+      }
+    } catch (err) {
+      _iterator21.e(err);
+    } finally {
+      _iterator21.f();
+    }
+  }
+  cv.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    var r = cv.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+  }, {
+    passive: false
+  });
+  function zoomAt(sx, sy, f) {
+    var ns = Math.max(1.5, Math.min(60, view.s * f));
+    var wx = (sx - view.ox) / view.s,
+      wy = (sy - view.oy) / view.s;
+    view.s = ns;
+    view.ox = sx - wx * ns;
+    view.oy = sy - wy * ns;
+    render();
+  }
+  var $ = function $(id) {
+    return document.getElementById(id);
+  };
+  var ui = {
+    undo: $('undoBtn'),
+    redo: $('redoBtn'),
+    sel: $('selName'),
+    rot: $('rotBtn'),
+    flip: $('flipBtn'),
+    end: $('endBtn'),
+    del: $('delBtn'),
+    stats: $('stats'),
+    parts: $('parts'),
+    hint: $('hint'),
+    msg: $('msg')
+  };
+  function previewSVG(id) {
+    var _ref9;
+    var g = GEO[id];
+    var x0 = 1e9,
+      y0 = 1e9,
+      x1 = -1e9,
+      y1 = -1e9;
+    (_ref9 = []).concat.apply(_ref9, _toConsumableArray(g.paths)).forEach(function (_ref0) {
+      var _ref1 = _slicedToArray(_ref0, 2),
+        x = _ref1[0],
+        y = _ref1[1];
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
+    });
+    var pad = 1.6,
+      w = Math.max(x1 - x0, 4) + pad * 2,
+      h = Math.max(y1 - y0, 3) + pad * 2,
+      cx = (x0 + x1) / 2,
+      cy = (y0 + y1) / 2;
+    var vb = [cx - w / 2, cy - h / 2, w, h].map(function (v) {
+      return v.toFixed(2);
+    }).join(' ');
+    var ds = g.paths.map(function (p) {
+      return 'M' + p.map(function (q) {
+        return q[0].toFixed(2) + ' ' + q[1].toFixed(2);
+      }).join('L');
+    }).join(' ');
+    var sw = Math.max(w, h) / 14;
+    return "<svg viewBox=\"".concat(vb, "\" preserveAspectRatio=\"xMidYMid meet\" aria-hidden=\"true\"><path d=\"").concat(ds, "\" fill=\"none\" stroke=\"var(--ballast)\" stroke-width=\"").concat(sw * 2.2, "\" stroke-linecap=\"butt\"/><path d=\"").concat(ds, "\" fill=\"none\" stroke=\"var(--ink)\" stroke-width=\"").concat(sw * 0.7, "\" stroke-linecap=\"round\"/></svg>");
+  }
+  function sub(d) {
+    if (d.kind === 'straight') return 'Length ' + d.L + '"';
+    if (d.kind === 'curve') {
+      var n = 360 / d.deg;
+      return n + ' per circle · ' + d.R * 2 + '" dia';
+    }
+    if (d.kind === 'turnout') return d.deg + '° diverge · ' + d.L + '" long';
+    if (d.kind === 'cross') return d.L + '" legs';
+    return 'Ends a siding';
+  }
+  (function buildPalette() {
+    var pal = $('palette');
+    var groups = _toConsumableArray(new Set(DEFS.map(function (d) {
+      return d.g;
+    })));
+    pal.innerHTML = groups.map(function (g) {
+      return "<div class=\"grp\"><h3>".concat(g, "</h3><div class=\"items\">").concat(DEFS.filter(function (d) {
+        return d.g === g;
+      }).map(function (d) {
+        return "<button class=\"piece\" data-def=\"".concat(d.id, "\">").concat(previewSVG(d.id), "<span><b>").concat(d.name, "</b><small>").concat(sub(d), "</small></span></button>");
+      }).join(''), "</div></div>");
+    }).join('');
+    pal.addEventListener('click', function (e) {
+      var b = e.target.closest('.piece');
+      if (b) addPiece(b.dataset.def);
+    });
+  })();
+  function updatePanels() {
+    var p = byId(selected);
+    ui.sel.textContent = p ? DEF[p.def].name + (p.flip && DEF[p.def].kind === 'curve' ? ' (flipped)' : '') : 'Tap a piece on the table';
+    ui.sel.classList.toggle('none', !p);
+    [ui.rot, ui.flip, ui.end, ui.del, $('pX'), $('pY'), $('pA')].forEach(function (b) {
+      return b.disabled = !p;
+    });
+    {
+      var setv = function setv(id, v) {
+        var el = $(id);
+        if (document.activeElement !== el) el.value = v;
+      };
+      if (p) {
+        var o = wp(p, 0);
+        setv('pX', (Math.round(o.x * 100) / 100).toString());
+        setv('pY', (Math.round(o.y * 100) / 100).toString());
+        setv('pA', (Math.round(norm(p.rot) / D2R * 10) / 10 % 360).toString());
+      } else {
+        setv('pX', '');
+        setv('pY', '');
+        setv('pA', '');
+      }
+    }
+    $('gridSel').value = String(S.grid);
+    $('posScope').textContent = moveMode === 'section' ? 'Changes move everything connected to this piece.' : 'Changes move just this piece.';
+    $('moveSeg').hidden = mode === 'shapes';
+    document.querySelectorAll('#moveSeg button').forEach(function (b) {
+      return b.setAttribute('aria-pressed', String(b.dataset.move === moveMode));
+    });
+    var open = cache.ports.filter(function (pt) {
+      return !cache.link.has(pt.pid + ':' + pt.i);
+    }).length;
+    var len = 0;
+    var _iterator23 = _createForOfIteratorHelper(S.pieces),
+      _step23;
+    try {
+      for (_iterator23.s(); !(_step23 = _iterator23.n()).done;) {
+        var _q6 = _step23.value;
+        var _iterator24 = _createForOfIteratorHelper(GEO[_q6.def].paths),
+          _step24;
+        try {
+          for (_iterator24.s(); !(_step24 = _iterator24.n()).done;) {
+            var path = _step24.value;
+            len += pathLen(path);
+          }
+        } catch (err) {
+          _iterator24.e(err);
+        } finally {
+          _iterator24.f();
+        }
+      }
+    } catch (err) {
+      _iterator23.e(err);
+    } finally {
+      _iterator23.f();
+    }
+    var bad = cache.bad.size;
+    ui.stats.innerHTML = "\n    <div class=\"stat\"><dt>Pieces</dt><dd>".concat(S.pieces.length, "</dd></div>\n    <div class=\"stat\"><dt>Track length</dt><dd>").concat((len / 12).toFixed(1), " ft</dd></div>\n    <div class=\"stat\"><dt>Open ends</dt><dd>").concat(S.pieces.length ? "<span class=\"pill ".concat(open ? 'bad' : 'ok', "\">").concat(open ? open : '0 · closed loop', "</span>") : '—', "</dd></div>\n    <div class=\"stat\"><dt>Off table / over hole</dt><dd>").concat(S.pieces.length ? "<span class=\"pill ".concat(bad ? 'bad' : 'ok', "\">").concat(bad ? bad + ' pieces' : 'none', "</span>") : '—', "</dd></div>");
+    var counts = {};
+    S.pieces.forEach(function (q) {
+      return counts[q.def] = (counts[q.def] || 0) + 1;
+    });
+    var rows = DEFS.filter(function (d) {
+      return counts[d.id];
+    }).map(function (d) {
+      return "<tr><td>".concat(d.name, "</td><td>\xD7 ").concat(counts[d.id], "</td></tr>");
+    }).join('');
+    ui.parts.innerHTML = rows || '<tr><td class="empty">No track placed yet</td><td></td></tr>';
+    var q = shapeById(selShape);
+    $('shapeEdit').hidden = !q;
+    if (q) {
+      document.querySelectorAll('#roleSeg button').forEach(function (b) {
+        return b.setAttribute('aria-pressed', String(b.dataset.role === q.role));
+      });
+      var set = function set(id, v) {
+        var el = $(id);
+        if (document.activeElement !== el) el.value = fmt(v);
+      };
+      set('shX', q.x);
+      set('shY', q.y);
+      set('shW', q.w);
+      set('shH', q.h);
+      $('shWLabel').textContent = q.kind === 'circle' ? 'Diameter (in)' : 'Width (in)';
+      $('shHWrap').hidden = q.kind === 'circle';
+    }
+    if (mode === 'shapes') ui.hint.innerHTML = q ? '<span><strong>Drag</strong> to move, drag a <strong>corner square</strong> to resize, or type exact sizes in the panel.</span>' : '<span>Tap a shape to edit it, or add a rectangle, oval or circle from <strong>Table shapes</strong>.</span>';else if (activeEnd) ui.hint.innerHTML = '<span class="dot"></span><span><strong>End selected.</strong> Tap pieces in the list to keep building from it.</span>';else if (!S.pieces.length) ui.hint.innerHTML = '<span>Tap any piece in the list to put it on the table.</span>';else ui.hint.innerHTML = '<span>Tap an <strong>open end</strong> (ring) to build from it. Drag a piece to move it; it snaps on when its end comes close to another.</span>';
+  }
+  function syncFields() {}
+  $('moveSeg').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    moveMode = b.dataset.move;
+    try {
+      localStorage.setItem('ho-move-mode', moveMode);
+    } catch (err) {}
+    render();
+  });
+  $('gridSel').addEventListener('change', function (e) {
+    S.grid = +e.target.value;
+    save();
+    render();
+  });
+  function movePiece(k, val) {
+    var p = byId(selected);
+    if (!p || isNaN(val)) {
+      render();
+      return;
+    }
+    snap();
+    var g = movingSet(p),
+      o = wp(p, 0);
+    if (k === 'a') {
+      rotateGroup(g, norm(val * D2R) - p.rot, o.x, o.y);
+    } else {
+      var dx = k === 'x' ? val - o.x : 0,
+        dy = k === 'y' ? val - o.y : 0;
+      g.forEach(function (q) {
+        q.x += dx;
+        q.y += dy;
+      });
+    }
+    save();
+    render();
+  }
+  $('pX').addEventListener('change', function (e) {
+    return movePiece('x', parseFloat(e.target.value));
+  });
+  $('pY').addEventListener('change', function (e) {
+    return movePiece('y', parseFloat(e.target.value));
+  });
+  $('pA').addEventListener('change', function (e) {
+    return movePiece('a', parseFloat(e.target.value));
+  });
+  function setMode(m, quiet) {
+    mode = m;
+    document.querySelectorAll('#modeSeg button').forEach(function (b) {
+      return b.setAttribute('aria-pressed', String(b.dataset.mode === m));
+    });
+    if (m === 'shapes') {
+      selected = null;
+      activeEnd = null;
+    } else selShape = null;
+    if (!quiet) render();
+  }
+  $('modeSeg').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (b) setMode(b.dataset.mode);
+  });
+  document.querySelectorAll('[data-add]').forEach(function (b) {
+    return b.addEventListener('click', function () {
+      snap();
+      var kind = b.dataset.add,
+        c = toWorld(W / 2, H / 2),
+        w = kind === 'circle' ? 12 : 24,
+        h = kind === 'circle' ? 12 : 12;
+      var q = {
+        id: nextShape++,
+        kind,
+        role: kind === 'rect' ? 'table' : 'hole',
+        x: snapShape(c.x - w / 2),
+        y: snapShape(c.y - h / 2),
+        w,
+        h
+      };
+      S.shapes.push(q);
+      setMode('shapes', true);
+      selShape = q.id;
+      save();
+      render();
+    });
+  });
+  $('roleSeg').addEventListener('click', function (e) {
+    var b = e.target.closest('button'),
+      q = shapeById(selShape);
+    if (!b || !q || q.role === b.dataset.role) return;
+    snap();
+    q.role = b.dataset.role;
+    save();
+    render();
+  });
+  [['shX', 'x'], ['shY', 'y'], ['shW', 'w'], ['shH', 'h']].forEach(function (_ref10) {
+    var _ref11 = _slicedToArray(_ref10, 2),
+      id = _ref11[0],
+      k = _ref11[1];
+    return $(id).addEventListener('change', function (e) {
+      var q = shapeById(selShape),
+        v = parseFloat(e.target.value);
+      if (!q) return;
+      if (isNaN(v)) {
+        render();
+        return;
+      }
+      snap();
+      q[k] = k === 'w' || k === 'h' ? Math.max(1, v) : v;
+      if (q.kind === 'circle' && k === 'w') q.h = q.w;
+      save();
+      render();
+    });
+  });
+  $('shDup').onclick = function () {
+    var q = shapeById(selShape);
+    if (!q) return;
+    snap();
+    var n = _objectSpread(_objectSpread({}, q), {}, {
+      id: nextShape++,
+      x: q.x + 3,
+      y: q.y + 3
+    });
+    S.shapes.push(n);
+    selShape = n.id;
+    save();
+    render();
+  };
+  function delShape() {
+    if (selShape == null) return;
+    snap();
+    S.shapes = S.shapes.filter(function (q) {
+      return q.id !== selShape;
+    });
+    selShape = null;
+    save();
+    render();
+  }
+  $('shDel').onclick = delShape;
+  ui.undo.onclick = doUndo;
+  ui.redo.onclick = doRedo;
+  $('fitBtn').onclick = function () {
+    fit();
+    render();
+  };
+  $('zin').onclick = function () {
+    return zoomAt(W / 2, H / 2, 1.25);
+  };
+  $('zout').onclick = function () {
+    return zoomAt(W / 2, H / 2, 0.8);
+  };
+  var clearTimer = null;
+  var clr = $('clearBtn');
+  clr.onclick = function () {
+    if (clr.classList.contains('armed')) {
+      clearTimeout(clearTimer);
+      clr.classList.remove('armed');
+      clr.textContent = 'Clear track';
+      snap();
+      S.pieces = [];
+      selected = null;
+      activeEnd = null;
+      save();
+      render();
+      return;
+    }
+    clr.classList.add('armed');
+    clr.textContent = 'Tap again to clear';
+    clearTimer = setTimeout(function () {
+      clr.classList.remove('armed');
+      clr.textContent = 'Clear track';
+    }, 3000);
+  };
+  ui.rot.onclick = doRotate;
+  ui.flip.onclick = doFlip;
+  ui.end.onclick = doSwap;
+  ui.del.onclick = doDelete;
+  function flash(t, bad) {
+    ui.msg.textContent = t;
+    ui.msg.style.color = bad ? 'var(--warn)' : 'var(--ok)';
+    setTimeout(function () {
+      ui.msg.textContent = '';
+    }, 3500);
+  }
+  $('copyBtn').onclick = function () {
+    var code = JSON.stringify(S);
+    var box = $('importBox');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(function () {
+        return flash('Copied layout code.');
+      }, function () {
+        box.value = code;
+        box.select();
+        flash('Code is in the box below. Copy it from there.');
+      });
+    } else {
+      box.value = code;
+      box.select();
+      flash('Code is in the box below. Copy it from there.');
+    }
+  };
+  $('loadBtn').onclick = function () {
+    var v = $('importBox').value.trim();
+    if (!v) return flash('Paste a layout code first.', true);
+    try {
+      var o = JSON.parse(v);
+      snap();
+      loadState(o);
+      syncFields();
+      fit();
+      save();
+      render();
+      flash('Layout loaded.');
+    } catch (e) {
+      flash('That code could not be read. Copy the whole code and try again.', true);
+    }
+  };
+  document.addEventListener('keydown', function (e) {
+    if (e.target.closest('input,textarea')) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      e.shiftKey ? doRedo() : doUndo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      doRedo();
+      return;
+    }
+    var k = e.key.toLowerCase();
+    if (mode === 'shapes') {
+      if (k === 'delete' || k === 'backspace') {
+        e.preventDefault();
+        delShape();
+      } else if (k === 'escape') {
+        selShape = null;
+        render();
+      }
+      return;
+    }
+    if (k === 'r') doRotate();else if (k === 'f') doFlip();else if (k === 'e') doSwap();else if (k === 'delete' || k === 'backspace') {
+      e.preventDefault();
+      doDelete();
+    } else if (k === 'escape') {
+      selected = null;
+      activeEnd = null;
+      render();
+    }
+  });
+  readColors();
+  var loaded = false;
+  try {
+    var raw = localStorage.getItem(KEY);
+    if (raw) {
+      loadState(JSON.parse(raw));
+      loaded = true;
+    }
+  } catch (e) {}
+  syncFields();
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);else {
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', function () {
+      return setTimeout(resize, 250);
+    });
+    resize();
+  }
+  var themeChanged = function themeChanged() {
+    readColors();
+    render();
+  };
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq.addEventListener) mq.addEventListener('change', themeChanged);else if (mq.addListener) mq.addListener(themeChanged);
+  } catch (e) {}
+  if (window.MutationObserver) new MutationObserver(themeChanged).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme']
+  });
 })();
 </script>
 
