@@ -176,8 +176,32 @@ textarea{width:100%;min-height:64px;resize:vertical;padding:6px 8px;border:1px s
   .side .pane{padding:10px}
   .stage{height:calc(100vh - 200px);min-height:280px;max-height:none}
 }
-@media (max-width:1080px) and (orientation:portrait), (max-width:799px){.app{grid-template-columns:200px minmax(0,1fr)}.side{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}}
-@media (max-width:760px){
+/* Phones in landscape: very short screen, so drop the title and hint and give the table the height */
+@media (orientation:landscape) and (min-width:600px) and (max-height:520px){
+  .app{grid-template-columns:150px minmax(0,1fr) 200px}
+  .brand,.hint{display:none}
+  .top{position:absolute;right:max(16px,env(safe-area-inset-right,0px));top:8px;margin:0;z-index:2}
+  .top .btn{padding:5px 9px;font-size:12px}
+  .gridpick{font-size:0}.gridpick select{font-size:12px}
+  .gridpick::before{content:"Grid";font-size:12px}
+  .seg button{min-height:32px;padding:5px 10px;font-size:12px}
+  .side{margin-top:34px}
+  .stage-wrap{height:calc(100vh - 16px)}
+  .stage-wrap>.stage{-webkit-flex:1 1 0;flex:1 1 0;height:auto;min-height:150px;max-height:none}
+  .gridpick select{min-height:30px;padding:3px 6px}
+  body{padding-top:8px;padding-bottom:8px}
+  .palette{max-height:calc(100vh - 16px)}.side{max-height:calc(100vh - 50px)}
+  .palette,.side{overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .piece{grid-template-columns:36px minmax(0,1fr);gap:6px;min-height:40px;padding:3px 4px}
+  .piece svg{width:36px;height:26px}
+  .piece small{display:none}
+  .side .pane{padding:8px}
+  .side h2{font-size:15px;margin-bottom:4px}
+  .history .btn{min-height:36px;padding:5px 10px;font-size:13px}
+  .zoom .btn{width:36px;height:36px}
+}
+@media (max-width:1080px) and (orientation:portrait), (max-width:599px){.app{grid-template-columns:200px minmax(0,1fr)}.side{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}}
+@media (max-width:760px) and (orientation:portrait), (max-width:599px){
   .app{grid-template-columns:minmax(0,1fr)}
   .stage-wrap{order:-1}
   .stage{height:56vh;min-height:300px}
@@ -894,8 +918,8 @@ if (!Array.prototype.includes) Array.prototype.includes = function (v) {
   }
   function fit() {
     var b = bounds(),
-      pad = W < 500 ? 28 : 44,
-      top = 76;
+      pad = W < 500 || H < 320 ? 24 : 44,
+      top = H < 320 ? 56 : 76;
     view.s = Math.max(1.5, Math.min((W - pad * 2) / b.w, (H - top - pad) / b.h));
     view.ox = (W - b.w * view.s) / 2 - b.x * view.s;
     view.oy = top + (H - top - pad - b.h * view.s) / 2 - b.y * view.s;
