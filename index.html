@@ -76,8 +76,8 @@ button{cursor:pointer}
 .hint strong{color:var(--ink);font-weight:600}
 .stage{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
 .seg button{min-height:40px}
-.stage{position:relative;height:min(70vh,720px);min-height:360px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
-canvas{display:block;width:100%;height:100%;touch-action:none;cursor:default}
+.stage{position:relative;height:70vh;max-height:720px;height:min(70vh,720px);min-height:360px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+canvas{display:block;position:absolute;left:0;top:0;width:100%;height:100%;touch-action:none;cursor:default}
 .zoom{position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;gap:4px}
 .zoom .btn{width:44px;height:44px;padding:0;font-size:20px;font-weight:600}
 .history{position:absolute;left:10px;top:10px;display:flex;gap:6px}
@@ -125,6 +125,29 @@ textarea{width:100%;min-height:64px;resize:vertical;padding:6px 8px;border:1px s
 .shape-edit{display:grid;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 .shape-edit .seg{width:100%}.shape-edit .seg button{flex:1}
 
+/* Old Safari (iOS 9) has no CSS grid and no flex gap: stacked layout with margins */
+@supports not (display:grid){
+  .app{display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column}
+  .app>*{margin-bottom:12px}
+  .stage-wrap{-webkit-order:-1;order:-1}
+  .stage-wrap>*{margin-bottom:8px}
+  .stage-head>*,.tools>*,.history>*,.row>*{margin-right:8px;margin-bottom:6px}
+  .zoom>*{margin-top:4px}
+  .palette{max-height:none;display:-webkit-flex;display:flex;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:8px}
+  .grp{-webkit-flex:none;flex:none;margin-right:14px}.grp + .grp{margin-top:0}
+  .items{display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;-webkit-flex-direction:column;flex-direction:column;max-height:124px}
+  .piece{display:-webkit-flex;display:flex;-webkit-align-items:center;align-items:center;width:190px;margin:0 4px 4px 0}
+  .piece svg{-webkit-flex:none;flex:none;margin-right:10px}
+  .side>*{margin-bottom:12px}
+  .actions,.fields,.add-shapes{display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;-webkit-justify-content:space-between;justify-content:space-between}
+  .actions>*,.fields>label{width:48.5%;margin-bottom:6px}
+  .add-shapes>*{width:32%}
+  .fields label>*{margin-top:3px}
+  .pos-note{width:100%}
+  .stats>*{margin-bottom:6px}
+  .shape-edit{display:block}.shape-edit>*{margin-bottom:8px}
+  .seg{display:-webkit-inline-flex}
+}
 @media (max-width:1080px){.app{grid-template-columns:200px minmax(0,1fr)}.side{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}}
 @media (max-width:760px){
   .app{grid-template-columns:minmax(0,1fr)}
@@ -269,6 +292,19 @@ function _unsupportedIterableToArray(r, a) { if (r) { if ("string" == typeof r) 
 function _arrayLikeToArray(r, a) { (null == a || a > r.length) && (a = r.length); for (var e = 0, n = Array(a); e < a; e++) n[e] = r[e]; return n; }
 function _iterableToArrayLimit(r, l) { var t = null == r ? null : "undefined" != typeof Symbol && r[Symbol.iterator] || r["@@iterator"]; if (null != t) { var e, n, i, u, a = [], f = !0, o = !1; try { if (i = (t = t.call(r)).next, 0 === l) { if (Object(t) !== t) return; f = !1; } else for (; !(f = (e = i.call(t)).done) && (a.push(e.value), a.length !== l); f = !0); } catch (r) { o = !0, n = r; } finally { try { if (!f && null != t.return && (u = t.return(), Object(u) !== u)) return; } finally { if (o) throw n; } } return a; } }
 function _arrayWithHoles(r) { if (Array.isArray(r)) return r; }
+if (window.NodeList && !NodeList.prototype.forEach) NodeList.prototype.forEach = Array.prototype.forEach;
+if (!Element.prototype.matches) Element.prototype.matches = Element.prototype.webkitMatchesSelector;
+if (!Element.prototype.closest) Element.prototype.closest = function (sel) {
+  var el = this;
+  while (el && el.nodeType === 1) {
+    if (el.matches(sel)) return el;
+    el = el.parentElement;
+  }
+  return null;
+};
+if (!Array.prototype.includes) Array.prototype.includes = function (v) {
+  return this.indexOf(v) !== -1;
+};
 (function () {
   var PI = Math.PI,
     TAU = PI * 2,
